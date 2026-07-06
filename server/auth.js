@@ -39,8 +39,8 @@ function handleSsoAccept(req, res) {
     }
 
     const roles = Array.isArray(payload.roles) ? payload.roles.map(norm) : [];
-    if (!roles.includes('buyer') && !roles.includes('admin')) {
-      return res.status(403).json({ error: 'Доступ только для баеров' });
+    if (!roles.some((r) => config.botAllowedRoles.includes(r))) {
+      return res.status(403).json({ error: 'Доступ ограничен' });
     }
 
     const sessionToken = jwt.sign(
