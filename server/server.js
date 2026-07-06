@@ -13,6 +13,8 @@ const { uniquifyBatch } = require('./textDecorator');
 const { handleSsoAccept, ownerMiddleware, whoAmI } = require('./auth');
 
 const app = express();
+// За Cloudflare Tunnel / прокси: доверяем X-Forwarded-* (протокол и т.п.).
+app.set('trust proxy', true);
 // origin:true отражает источник запроса и разрешает credentials (куку). При
 // встраивании в iframe фронт и API — один origin, CORS не срабатывает вовсе.
 app.use(cors({
@@ -393,6 +395,21 @@ function cleanupOld() {
   } catch (e) {
     logger.warn(`Автоочистка не удалась: ${e.message}`, 'cleanup');
   }
+}
+
+// Прод: если фронт собран (client/dist) — отдаём его с того же адреса, что и API
+// (один origin: удобно для туннеля и iframe). В dev фронт крутит Vite (:5173),
+// dist нет — этот блок пропускается.
+const clientDist = path.resolve(__dirname, '..', 'client', 'dist');
+if (fs.existsSync(clientDist)) {
+  app.use(express.static(clientDist));
+  // SPA-fallback: любой GET не под /api и /uploads отдаёт index.html.
+  app.use((req, res, next) => {
+    if (req.method !== 'GET') return next();
+    if (req.path.startsWith('/api') || req.path.startsWith('/uploads')) return next();
+    return res.sendFile(path.join(clientDist, 'index.html'));
+  });
+  logger.info('Фронт отдаётся из client/dist (один origin с API)', 'boot');
 }
 
 app.listen(config.port, () => {

@@ -1,7 +1,14 @@
 import { useState, useEffect, useRef } from 'react'
 import axios from 'axios'
 
-const API_BASE = import.meta.env.VITE_API_BASE || 'http://localhost:3000'
+// Адрес API. Если задан VITE_API_BASE — берём его. Иначе автоопределение:
+// на Vite-dev (порт 5173) ходим на локальный бэкенд :3000; когда фронт отдаёт
+// сам бэкенд/туннель (любой другой origin) — относительные пути (/api,/uploads).
+const API_BASE = import.meta.env.VITE_API_BASE ?? (
+  (typeof location !== 'undefined' && location.port === '5173')
+    ? 'http://localhost:3000'
+    : ''
+)
 
 // Куку сессии шлём со всеми запросами (нужно, когда бот встроен в таск-менеджер).
 axios.defaults.withCredentials = true
