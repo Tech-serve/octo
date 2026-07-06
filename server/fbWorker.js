@@ -278,7 +278,7 @@ async function attachImage(page, imagePath, log) {
 
 async function leaveFacebookComment(payload, log, handle = {}) {
   const {
-    profileUuid, postUrl, commentText, imagePath,
+    profileUuid, postUrl, commentText, imagePath, replyToText,
   } = payload;
   let connection;
   // Если задачу отменили — прерываемся с понятной ошибкой (её поймает очередь).
