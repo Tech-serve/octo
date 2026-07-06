@@ -1,0 +1,21 @@
+# Зависимости
+node_modules/
+
+# Секреты и локальная конфигурация
+.env
+.env.*
+!.env.example
+
+# Данные и логи (не коммитим)
+logs/
+data/
+server/data/
+server/logs/
+
+# Сборка фронта
+client/dist/
+client/build/
+
+# Прочее
+*.log
+.DS_Store

@@ -1,0 +1,253 @@
+const config = require('./config');
+const store = require('./taskStore');
+const { createTaskLogger, logger } = require('./logger');
+const { leaveFacebookComment } = require('./fbWorker');
+const { disconnectOcto } = require('./octoService');
+
+// Ручки бегущих задач (для жёсткой отмены): taskId -> { canceled, browser, profileUuid }.
+const running = new Map();
+
+// Очередь с ограничением параллелизма + двумя правилами:
+//  1) задача не стартует раньше task.scheduledAt (разбивка по времени);
+//  2) задачи ОДНОГО профиля не выполняются одновременно (один профиль = один
+//     браузер Octo) — параллелятся только разные профили.
+const pending = [];
+let active = 0;
+const runningProfiles = new Set();
+let ticker = null;
+
+// Скользящее среднее реальной длительности задачи (учимся на фактах).
+let avgDurationMs = 90000; // стартовая оценка до первых замеров
+let durationSamples = 0;
+
+function recordDuration(taskId) {
+  const t = store.get(taskId);
+  if (!t || !t.startedAt || !t.finishedAt) return;
+  const dur = new Date(t.finishedAt).getTime() - new Date(t.startedAt).getTime();
+  if (!(dur > 0) || dur > 30 * 60000) return; // отсечь мусорные значения
+  avgDurationMs = durationSamples === 0
+    ? dur
+    : Math.round((avgDurationMs * durationSamples + dur) / (durationSamples + 1));
+  durationSamples = Math.min(durationSamples + 1, 50); // ограничиваем инерцию среднего
+}
+
+function getAvgDurationMs() {
+  return avgDurationMs;
+}
+
+// Когда (абсолютное время, мс) освободится профиль по цепочке его задач.
+// Учитываем сериализацию: задачи одного профиля идут строго по очереди.
+function chainFreeAt(taskList, nowTs) {
+  const sorted = taskList.slice().sort((a, b) => (a.scheduledAt || 0) - (b.scheduledAt || 0));
+  let cursor = nowTs;
+  for (const t of sorted) {
+    const start = (t.status === 'running' && t.startedAt)
+      ? new Date(t.startedAt).getTime()
+      : Math.max(cursor, t.scheduledAt || nowTs);
+    let finish = start + avgDurationMs;
+    if (t.status === 'running' && finish < nowTs + 8000) finish = nowTs + 8000;
+    cursor = Math.max(finish, cursor);
+  }
+  return cursor;
+}
+
+// Абсолютное время освобождения конкретного профиля (или now, если свободен).
+const isActive = (t) => t.status !== 'done' && t.status !== 'error' && t.status !== 'canceled';
+
+function profileFreeAt(profileUuid, nowTs = Date.now()) {
+  const list = store.list().filter((t) => t.profileUuid === profileUuid && isActive(t));
+  return chainFreeAt(list, nowTs);
+}
+
+// УМНОЕ РАЗМЕЩЕНИЕ: самое раннее время ≥ desiredStart (и ≥ now), где до любой
+// уже существующей задачи этого фейка сохраняется зазор ≥ [MIN_FAKE_GAP]. Так
+// новая задача заполняет простой ПЕРЕД будущей запланированной, а не ждёт её.
+function earliestSlot(profileUuid, desiredStart, nowTs = Date.now()) {
+  const gMin = config.minFakeGapMinMs;
+  const gMax = Math.max(config.minFakeGapMaxMs, gMin);
+  const G = gMin + Math.random() * (gMax - gMin);
+
+  const starts = store.list()
+    .filter((t) => t.profileUuid === profileUuid && isActive(t))
+    .map((t) => ((t.status === 'running' && t.startedAt)
+      ? new Date(t.startedAt).getTime()
+      : (t.scheduledAt || nowTs)))
+    .sort((a, b) => a - b);
+
+  let t = Math.max(desiredStart, nowTs);
+  for (const s of starts) {
+    if (s + G <= t) continue; // существующая задача достаточно раньше — не мешает
+    if (t + G <= s) break; // до неё хватает окна — ставим здесь
+    t = s + G; // слишком близко — сдвигаем сразу после неё (с зазором)
+  }
+  return Math.round(t);
+}
+
+// Занятость по всем профилям: { uuid: { freeInMs, startInMs } }.
+//  freeInMs  — через сколько профиль освободится (конец цепочки задач);
+//  startInMs — через сколько НАЧНЁТСЯ ближайшая задача (0 если уже идёт/пора).
+// Возвращаем остатки (а не абсолют), чтобы не зависеть от часов клиента.
+function busyRemaining(nowTs = Date.now()) {
+  const active = store.list().filter(isActive);
+  const byProfile = {};
+  for (const t of active) {
+    (byProfile[t.profileUuid] = byProfile[t.profileUuid] || []).push(t);
+  }
+  const out = {};
+  for (const uuid of Object.keys(byProfile)) {
+    const list = byProfile[uuid];
+    const free = chainFreeAt(list, nowTs);
+    if (free <= nowTs) continue;
+
+    // Ближайший старт: у бегущей — реальный старт, у остальных — scheduledAt.
+    let start = Infinity;
+    for (const t of list) {
+      const s = (t.status === 'running' && t.startedAt)
+        ? new Date(t.startedAt).getTime()
+        : (t.scheduledAt || nowTs);
+      if (s < start) start = s;
+    }
+    out[uuid] = {
+      freeInMs: free - nowTs,
+      startInMs: Math.max(0, start - nowTs),
+    };
+  }
+  return out;
+}
+
+// Таймер, чтобы отложенные (scheduledAt в будущем) задачи стартовали вовремя,
+// даже если не приходит новых событий.
+function ensureTicker() {
+  if (ticker) return;
+  ticker = setInterval(drain, 10000);
+  if (ticker.unref) ticker.unref();
+}
+
+function enqueue(task) {
+  pending.push(task);
+  logger.info(`Задача ${task.id} добавлена в очередь (в очереди: ${pending.length}, активно: ${active})`, 'queue');
+  ensureTicker();
+  drain();
+}
+
+function drain() {
+  const now = Date.now();
+  let started = true;
+  while (active < config.maxConcurrent && started) {
+    started = false;
+    for (let i = 0; i < pending.length; i++) {
+      const task = pending[i];
+
+      // Зависимость (режим 3): реплика ждёт завершения предыдущего шага.
+      if (task.dependsOn) {
+        const dep = store.get(task.dependsOn);
+        const depStatus = dep ? dep.status : 'error';
+        if (depStatus === store.STATUS.ERROR || depStatus === store.STATUS.CANCELED) {
+          // Предыдущий шаг не удался/отменён — вся ветка обрывается.
+          pending.splice(i, 1);
+          store.update(task.id, {
+            status: store.STATUS.CANCELED,
+            finishedAt: new Date().toISOString(),
+          });
+          started = true;
+          break;
+        }
+        if (depStatus !== store.STATUS.DONE) continue; // ещё не готов — ждём
+      }
+
+      if ((task.scheduledAt || 0) > now) continue; // ещё не время
+      if (runningProfiles.has(task.payload.profileUuid)) continue; // профиль занят
+      pending.splice(i, 1);
+      runTask(task);
+      started = true;
+      break; // пересчитываем условия цикла заново
+    }
+  }
+}
+
+async function runTask(task) {
+  active++;
+  runningProfiles.add(task.payload.profileUuid);
+  const handle = { canceled: false, browser: null, profileUuid: task.payload.profileUuid };
+  running.set(task.id, handle);
+  const taskLog = createTaskLogger(task.id);
+
+  store.update(task.id, {
+    status: store.STATUS.RUNNING,
+    startedAt: new Date().toISOString(),
+  });
+  taskLog.info(`Старт задачи. Профиль=${task.payload.profileUuid}, пост=${task.payload.postUrl}`);
+
+  try {
+    await leaveFacebookComment(task.payload, taskLog, handle);
+    store.update(task.id, {
+      status: store.STATUS.DONE,
+      finishedAt: new Date().toISOString(),
+      logs: taskLog.getLines(),
+    });
+    taskLog.info('Задача завершена успешно');
+  } catch (err) {
+    if (handle.canceled) {
+      store.update(task.id, {
+        status: store.STATUS.CANCELED,
+        finishedAt: new Date().toISOString(),
+        logs: taskLog.getLines(),
+      });
+      taskLog.info('Задача отменена пользователем');
+    } else {
+      store.update(task.id, {
+        status: store.STATUS.ERROR,
+        error: err.message,
+        finishedAt: new Date().toISOString(),
+        logs: taskLog.getLines(),
+      });
+      taskLog.error(`Задача завершилась с ошибкой: ${err.message}`);
+    }
+  } finally {
+    store.update(task.id, { logs: taskLog.getLines() });
+    taskLog.close();
+    if (!handle.canceled) recordDuration(task.id); // отменённые не портят среднее
+    running.delete(task.id);
+    active--;
+    runningProfiles.delete(task.payload.profileUuid);
+    drain();
+  }
+}
+
+// Отмена задачи. Если ещё в очереди — просто убираем. Если УЖЕ ВЫПОЛНЯЕТСЯ —
+// гасим её браузер и Octo-сессию: in-flight операции упадут, воркер размотается
+// и пометит задачу canceled.
+function cancel(id) {
+  const idx = pending.findIndex((t) => t.id === id);
+  if (idx >= 0) {
+    pending.splice(idx, 1);
+    store.update(id, { status: store.STATUS.CANCELED, finishedAt: new Date().toISOString() });
+    return 'canceled';
+  }
+
+  const handle = running.get(id);
+  if (handle) {
+    handle.canceled = true;
+    // Закрыть браузерную сессию (прервёт текущие действия воркера).
+    try { if (handle.browser) handle.browser.close().catch(() => {}); } catch { /* ignore */ }
+    // Остановить профиль Octo сразу, не дожидаясь finally воркера.
+    try { disconnectOcto(handle.profileUuid, logger); } catch { /* ignore */ }
+    // Оптимистично помечаем отменённой (воркер подтвердит в своём finally).
+    store.update(id, { status: store.STATUS.CANCELED, finishedAt: new Date().toISOString() });
+    return 'canceled';
+  }
+  return 'notfound';
+}
+
+function stats() {
+  return {
+    active,
+    queued: pending.length,
+    maxConcurrent: config.maxConcurrent,
+    runningProfiles: runningProfiles.size,
+  };
+}
+
+module.exports = {
+  enqueue, stats, cancel, getAvgDurationMs, profileFreeAt, earliestSlot, busyRemaining,
+};
