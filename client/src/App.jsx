@@ -3,6 +3,23 @@ import axios from 'axios'
 
 const API_BASE = import.meta.env.VITE_API_BASE || 'http://localhost:3000'
 
+// Куку сессии шлём со всеми запросами (нужно, когда бот встроен в таск-менеджер).
+axios.defaults.withCredentials = true
+
+// Одноразовое SSO-рукопожатие: если в URL пришёл ?sso= от таск-менеджера —
+// меняем его на сессионную куку бота и чистим URL, чтобы токен не светился.
+// В standalone (?sso нет) промис резолвится сразу.
+const ssoReady = (async () => {
+  const sso = new URLSearchParams(window.location.search).get('sso')
+  if (!sso) return
+  try {
+    await axios.post(`${API_BASE}/api/sso/accept`, { token: sso })
+  } catch { /* статус проверим через /api/me */ }
+  const url = new URL(window.location.href)
+  url.searchParams.delete('sso')
+  window.history.replaceState({}, '', url.pathname + url.search)
+})()
+
 // Показываем только профили с тегами Fakes / Sweeps (матчим по вхождению слов).
 const ALLOWED_TAGS = ['Fakes', 'Sweeps']
 const TAG_KEYWORDS = ['fake', 'sweep']
@@ -717,6 +734,7 @@ function History({ profiles }) {
 // Корень: вкладки-операции + общие профили и таймеры занятости фейков.
 // ─────────────────────────────────────────────────────────────────────────
 function App() {
+  const [authReady, setAuthReady] = useState(false)
   const [profiles, setProfiles] = useState([])
   const [profilesError, setProfilesError] = useState('')
   const [loadingProfiles, setLoadingProfiles] = useState(true)
@@ -743,7 +761,15 @@ function App() {
     }
   }
 
+  // Дожидаемся SSO-рукопожатия перед любыми запросами (иначе кука ещё не стоит).
   useEffect(() => {
+    let active = true
+    ssoReady.finally(() => { if (active) setAuthReady(true) })
+    return () => { active = false }
+  }, [])
+
+  useEffect(() => {
+    if (!authReady) return undefined
     let active = true
     axios.get(`${API_BASE}/api/profiles`)
       .then(({ data }) => {
@@ -754,7 +780,7 @@ function App() {
       .catch((e) => { if (active) setProfilesError(e.response?.data?.error || e.message) })
       .finally(() => { if (active) setLoadingProfiles(false) })
     return () => { active = false }
-  }, [])
+  }, [authReady])
 
   useEffect(() => {
     const id = setInterval(() => setNow(Date.now()), 1000)
@@ -762,6 +788,7 @@ function App() {
   }, [])
 
   useEffect(() => {
+    if (!authReady) return undefined
     let active = true
     const fetchBusy = async () => {
       try {
@@ -774,7 +801,7 @@ function App() {
     fetchBusy()
     const id = setInterval(fetchBusy, 3000)
     return () => { active = false; clearInterval(id) }
-  }, [])
+  }, [authReady])
 
   const addTab = (m) => {
     if (tabs[m].length >= MAX_OPS) return
@@ -801,6 +828,14 @@ function App() {
     { m: 2, label: 'Режим 2 · один пост → много фейков' },
     { m: 3, label: 'Режим 3 · диалоги (дерево)' },
   ]
+
+  if (!authReady) {
+    return (
+      <div style={{ maxWidth: '1100px', margin: '0 auto', padding: '34px 24px', color: 'var(--muted)' }}>
+        Загрузка…
+      </div>
+    )
+  }
 
   return (
     <div style={{ maxWidth: '1100px', margin: '0 auto', padding: '34px 24px 64px' }}>

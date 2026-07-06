@@ -73,6 +73,25 @@ const config = {
   // новая задача встаёт в самое раннее окно, где до соседних задач ≥ этого.
   minFakeGapMinMs: Math.max(0, num(process.env.MIN_FAKE_GAP_MIN, 5)) * 60000,
   minFakeGapMaxMs: Math.max(0, num(process.env.MIN_FAKE_GAP_MAX, 10)) * 60000,
+
+  // Авторизация. Выключена (standalone) — работает как раньше, без входа,
+  // владелец задач = 'local'. Включена (встроен в таск-менеджер) — приходит
+  // SSO-токен от ТМ, дальше бот держит свою сессионную куку.
+  authEnabled: bool(process.env.AUTH_ENABLED, false),
+  // Общий секрет с таск-менеджером (тот же GENERATOR_SSO_SECRET). Им бот
+  // проверяет входящий SSO-токен.
+  ssoSecret: process.env.GENERATOR_SSO_SECRET || '',
+  ssoAudience: process.env.SSO_AUDIENCE || 'generator',
+  ssoIssuer: process.env.SSO_ISSUER || 'taskmanager',
+  // Свой секрет для сессионной куки бота (НЕ равен ssoSecret).
+  sessionSecret: process.env.SESSION_JWT_SECRET || '',
+  // Домен куки (напр. .vroo.it.com — чтобы кука жила и в iframe).
+  cookieDomain: process.env.COOKIE_DOMAIN || '',
+  // secure + SameSite=None нужны для cross-origin iframe (только по HTTPS).
+  // Локально по http держим false, иначе браузер не примет куку.
+  cookieSecure: bool(process.env.COOKIE_SECURE, false),
+  // Разрешённый источник для встраивания в iframe (домен таск-менеджера).
+  frameAncestor: process.env.FRAME_ANCESTOR || '',
 };
 
 module.exports = config;

@@ -3,20 +3,40 @@ const path = require('path');
 const crypto = require('crypto');
 const express = require('express');
 const cors = require('cors');
+const cookieParser = require('cookie-parser');
 const config = require('./config');
 const { logger } = require('./logger');
 const store = require('./taskStore');
 const queue = require('./queue');
 const { listProfiles } = require('./octoService');
 const { uniquifyBatch } = require('./textDecorator');
+const { handleSsoAccept, ownerMiddleware, whoAmI } = require('./auth');
 
 const app = express();
-app.use(cors({ origin: config.corsOrigin }));
+// origin:true отражает источник запроса и разрешает credentials (куку). При
+// встраивании в iframe фронт и API — один origin, CORS не срабатывает вовсе.
+app.use(cors({
+  origin: config.corsOrigin === '*' ? true : config.corsOrigin.split(',').map((s) => s.trim()),
+  credentials: true,
+}));
+app.use(cookieParser());
 // Лимит побольше — картинки приходят как base64 в JSON.
 app.use(express.json({ limit: '30mb' }));
+// Разрешаем встраивание в iframe только с домена таск-менеджера (если задан).
+// НЕ ставим X-Frame-Options — он перебил бы frame-ancestors.
+if (config.frameAncestor) {
+  app.use((req, res, next) => {
+    res.setHeader('Content-Security-Policy', `frame-ancestors ${config.frameAncestor}`);
+    next();
+  });
+}
 // Раздаём прикреплённые картинки (для истории/просмотра).
 fs.mkdirSync(config.uploadDir, { recursive: true });
 app.use('/uploads', express.static(config.uploadDir));
+
+// SSO: приём одноразового токена от таск-менеджера + «кто я».
+app.post('/api/sso/accept', handleSsoAccept);
+app.get('/api/me', whoAmI);
 
 // Сохранить картинку из data:URL в файл. Возвращает путь или null.
 function saveImage(dataUrl) {
@@ -32,7 +52,7 @@ function saveImage(dataUrl) {
 }
 
 // Список профилей Octo для выпадающего списка на фронте.
-app.get('/api/profiles', async (req, res) => {
+app.get('/api/profiles', ownerMiddleware, async (req, res) => {
   try {
     const profiles = await listProfiles();
     res.json({ profiles });
@@ -50,7 +70,8 @@ app.get('/api/profiles', async (req, res) => {
 // Создание задач -> в очередь. Принимаем posts[] = [{ url, image }] (image —
 // data:URL base64, необязателен). На каждый пост — своя задача с уникальным
 // хвостом текста и (если есть) своей картинкой. Совместимо со старым postUrls[].
-app.post('/api/tasks', (req, res) => {
+app.post('/api/tasks', ownerMiddleware, (req, res) => {
+  const owner = req.owner;
   const {
     profileUuid, postUrl, postUrls, posts, entries, dialogs, commentText,
   } = req.body || {};
@@ -129,7 +150,7 @@ app.post('/api/tasks', (req, res) => {
             replyToText,
           },
           {
-            scheduledAt, dialogId, stepOrder: idx + 1, dependsOn,
+            scheduledAt, dialogId, stepOrder: idx + 1, dependsOn, owner,
           },
         );
         queue.enqueue(task);
@@ -207,7 +228,7 @@ app.post('/api/tasks', (req, res) => {
         commentText: e.comment,
         baseText: e.comment,
         imagePath,
-      }, { scheduledAt });
+      }, { scheduledAt, owner });
       queue.enqueue(task);
       return {
         taskId: task.id,
@@ -289,7 +310,7 @@ app.post('/api/tasks', (req, res) => {
       commentText: variants[idx], // уже с уникальным хвостом
       baseText: base, // для лимита одинаковых
       imagePath,
-    }, { scheduledAt });
+    }, { scheduledAt, owner });
     queue.enqueue(task);
     return {
       taskId: task.id,
@@ -316,28 +337,39 @@ app.post('/api/tasks', (req, res) => {
 // задачи берём реальный старт, для будущих — запланированное время; длительность
 // — фактическое скользящее среднее. Возвращаем остаток, чтобы не зависеть от
 // расхождения часов клиента и сервера.
-app.get('/api/busy', (req, res) => {
+// Занятость профилей — общая (фейки — общий пул, таймеры общие).
+app.get('/api/busy', ownerMiddleware, (req, res) => {
   res.json({ busy: queue.busyRemaining(), avgDurationMs: queue.getAvgDurationMs() });
 });
 
-// Отмена задач по id (только те, что ещё не стартовали).
-app.post('/api/tasks/cancel', (req, res) => {
+// Отмена задач по id (только те, что ещё не стартовали). Баер может отменять
+// только свои задачи.
+app.post('/api/tasks/cancel', ownerMiddleware, (req, res) => {
   const ids = Array.isArray(req.body?.ids) ? req.body.ids : [];
-  const results = ids.map((id) => ({ id, result: queue.cancel(id) }));
+  const results = ids.map((id) => {
+    const task = store.get(id);
+    if (!task) return { id, result: 'not_found' };
+    if (config.authEnabled && task.owner !== req.owner) return { id, result: 'forbidden' };
+    return { id, result: queue.cancel(id) };
+  });
   const canceled = results.filter((r) => r.result === 'canceled').length;
   res.json({ canceled, results });
 });
 
-// Статус конкретной задачи (для поллинга с фронта)
-app.get('/api/tasks/:id', (req, res) => {
+// Статус конкретной задачи (для поллинга с фронта). Только своя задача.
+app.get('/api/tasks/:id', ownerMiddleware, (req, res) => {
   const task = store.get(req.params.id);
   if (!task) return res.status(404).json({ error: 'Задача не найдена' });
+  if (config.authEnabled && task.owner !== req.owner) {
+    return res.status(404).json({ error: 'Задача не найдена' });
+  }
   res.json(store.toPublic(task));
 });
 
-// Список всех задач + статистика очереди
-app.get('/api/tasks', (req, res) => {
-  res.json({ tasks: store.list(), ...queue.stats() });
+// Список задач + статистика очереди. Баер видит только свои задачи.
+app.get('/api/tasks', ownerMiddleware, (req, res) => {
+  const owner = config.authEnabled ? req.owner : null;
+  res.json({ tasks: store.list(owner), ...queue.stats() });
 });
 
 app.get('/api/health', (req, res) => {

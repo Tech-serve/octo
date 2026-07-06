@@ -42,6 +42,7 @@ for (const alter of [
   'ALTER TABLE tasks ADD COLUMN step_order INTEGER', // режим 3: порядок реплики
   'ALTER TABLE tasks ADD COLUMN depends_on TEXT',  // режим 3: id задачи-предшественника
   'ALTER TABLE tasks ADD COLUMN reply_to_text TEXT', // режим 3: текст коммента, на который отвечаем
+  "ALTER TABLE tasks ADD COLUMN owner TEXT DEFAULT 'local'", // владелец задачи (user.id баера)
 ]) {
   try { db.exec(alter); } catch { /* колонка уже есть */ }
 }
@@ -60,6 +61,7 @@ function rowToTask(r) {
       imagePath: r.image_path || null,
       replyToText: r.reply_to_text || null,
     },
+    owner: r.owner || 'local',
     dependsOn: r.depends_on || null,
     dialogId: r.dialog_id || null,
     stepOrder: r.step_order != null ? r.step_order : null,
@@ -74,9 +76,9 @@ function rowToTask(r) {
 
 const insertStmt = db.prepare(`
   INSERT INTO tasks (id, status, profile_uuid, post_url, comment_text, base_text, image_path,
-    dialog_id, step_order, depends_on, reply_to_text,
+    dialog_id, step_order, depends_on, reply_to_text, owner,
     error, created_at, scheduled_at, started_at, finished_at, logs)
-  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 `);
 const countSameStmt = db.prepare(
   'SELECT COUNT(*) AS n FROM tasks WHERE profile_uuid = ? AND base_text = ?',
@@ -91,6 +93,7 @@ const updateStmt = db.prepare(`
   UPDATE tasks SET status = ?, error = ?, started_at = ?, finished_at = ?, logs = ?, scheduled_at = ? WHERE id = ?
 `);
 const listStmt = db.prepare('SELECT * FROM tasks ORDER BY created_at DESC');
+const listByOwnerStmt = db.prepare('SELECT * FROM tasks WHERE owner = ? ORDER BY created_at DESC');
 
 function createTask(payload, opts = {}) {
   const id = crypto.randomUUID();
@@ -102,15 +105,17 @@ function createTask(payload, opts = {}) {
   const stepOrder = opts.stepOrder != null ? opts.stepOrder : null;
   const dependsOn = opts.dependsOn || null;
   const replyToText = payload.replyToText || null;
+  const owner = opts.owner || 'local';
   insertStmt.run(
     id, STATUS.QUEUED, payload.profileUuid, payload.postUrl, payload.commentText,
-    baseText, imagePath, dialogId, stepOrder, dependsOn, replyToText,
+    baseText, imagePath, dialogId, stepOrder, dependsOn, replyToText, owner,
     null, createdAt, scheduledAt, null, null, '',
   );
   return {
     id,
     status: STATUS.QUEUED,
     payload: { ...payload, baseText, imagePath, replyToText },
+    owner,
     dependsOn,
     dialogId,
     stepOrder,
@@ -164,8 +169,10 @@ function toPublic(task) {
   };
 }
 
-function list() {
-  return listStmt.all().map(rowToTask).map(toPublic);
+// Список задач. Если передан owner — только его задачи (для баера в кабинете).
+function list(owner) {
+  const rows = owner ? listByOwnerStmt.all(owner) : listStmt.all();
+  return rows.map(rowToTask).map(toPublic);
 }
 
 // При старте сервера: незавершённые 'running' (прервались рестартом) вернуть в
