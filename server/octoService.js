@@ -104,6 +104,36 @@ async function readFbIdentity(page) {
   return out;
 }
 
+// Определить состояние аккаунта по открытой FB-странице. Возвращает код:
+// 'ok' | 'checkpoint' | 'disabled' | 'logout'. Опирается прежде всего на URL
+// (язык-независимо), плюс запасные признаки: капча и текст «аккаунт отключён».
+async function detectAccountStatus(page) {
+  const url = page.url();
+  if (/\/checkpoint\//i.test(url)) return 'checkpoint';
+  if (/two_step_verification|\/recover\/|\/confirmemail/i.test(url)) return 'checkpoint';
+  if (/\/disabled(\/|\b)/i.test(url)) return 'disabled';
+  if (/\/login/i.test(url)) return 'logout';
+
+  try {
+    const captcha = await page.$(
+      'iframe[src*="captcha" i], iframe[src*="recaptcha" i], iframe[src*="hcaptcha" i], '
+      + 'iframe[title*="captcha" i], div[id*="captcha" i], img[src*="captcha" i]',
+    );
+    if (captcha) return 'checkpoint';
+  } catch { /* ignore */ }
+
+  try {
+    const body = (await page.evaluate(() => ((document.body && document.body.innerText) || '').slice(0, 4000))).toLowerCase();
+    const disabledPhrases = [
+      'account has been disabled', 'your account has been disabled', 'account is disabled',
+      'ваш аккаунт отключ', 'ваш акаунт вимкнено', 'обліковий запис вимкнено',
+    ];
+    if (disabledPhrases.some((p) => body.includes(p))) return 'disabled';
+  } catch { /* ignore */ }
+
+  return 'ok';
+}
+
 async function connectToOcto(profileUuid, log) {
   log.info(`[Octo] Запуск профиля ${profileUuid}...`);
   const response = await axios.post(`${OCTO_LOCAL_API}/start`, {
@@ -145,4 +175,6 @@ async function disconnectOcto(profileUuid, log) {
   }
 }
 
-module.exports = { connectToOcto, disconnectOcto, listProfiles, readFbIdentity };
+module.exports = {
+  connectToOcto, disconnectOcto, listProfiles, readFbIdentity, detectAccountStatus,
+};

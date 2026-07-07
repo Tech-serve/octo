@@ -1,17 +1,23 @@
 const config = require('./config');
 const store = require('./taskStore');
 const { logger } = require('./logger');
-const { connectToOcto, disconnectOcto, readFbIdentity } = require('./octoService');
+const {
+  connectToOcto, disconnectOcto, readFbIdentity, detectAccountStatus,
+} = require('./octoService');
 
 const FB_URL = 'https://www.facebook.com/';
 
 // Состояние единственного фонового пересбора белого списка (одновременно один).
+//  alive   — аккаунтов «живых» (status ok);
+//  flagged — с проблемой (checkpoint/бан/разлогин), помечены ⚠️;
+//  failed  — не удалось открыть/прочитать (ошибка Octo/сети).
 const state = {
   running: false,
   canceled: false,
   total: 0,
   done: 0,
-  ok: 0,
+  alive: 0,
+  flagged: 0,
   failed: 0,
   current: '',
   startedAt: null,
@@ -23,7 +29,8 @@ function status() {
   return { ...state };
 }
 
-// Открыть один профиль, зайти на FB, прочитать identity, записать в whitelist.
+// Открыть один профиль, зайти на FB, прочитать identity + статус аккаунта,
+// записать в whitelist и обновить пометку ⚠️. Возвращает { status }.
 async function captureOne(uuid) {
   let connection;
   try {
@@ -31,12 +38,18 @@ async function captureOne(uuid) {
     const { page } = connection;
     await page.goto(FB_URL, { waitUntil: 'domcontentloaded', timeout: config.navTimeout });
     await page.waitForTimeout(1500); // дать FB отрисовать inline-данные
+
     const ident = await readFbIdentity(page);
-    if (ident.fbId || ident.fbName) {
-      store.upsertWhitelist(uuid, ident.fbId, ident.fbName);
-      return { ok: true, ...ident };
-    }
-    return { ok: false, error: 'identity not found' };
+    if (ident.fbId || ident.fbName) store.upsertWhitelist(uuid, ident.fbId, ident.fbName);
+
+    let acc = await detectAccountStatus(page);
+    // Нет сессии (нет c_user) и явного блока не видно — считаем разлогином.
+    if (acc === 'ok' && !ident.fbId) acc = 'logout';
+
+    if (acc === 'ok') store.clearProfileFlag(uuid);
+    else store.flagProfile(uuid, acc);
+
+    return { status: acc };
   } finally {
     try { if (connection && connection.browser) await connection.browser.close().catch(() => {}); } catch { /* ignore */ }
     try { await disconnectOcto(uuid, logger); } catch { /* ignore */ }
@@ -53,7 +66,7 @@ async function runPool(uuids, concurrency) {
       try {
         // eslint-disable-next-line no-await-in-loop
         const r = await captureOne(uuid);
-        if (r.ok) state.ok += 1; else state.failed += 1;
+        if (r.status === 'ok') state.alive += 1; else state.flagged += 1;
       } catch (e) {
         state.failed += 1;
         state.lastError = e.message;
@@ -75,7 +88,7 @@ function rebuild(uuids, opts = {}) {
   if (!list.length) return { started: false, reason: 'empty' };
 
   Object.assign(state, {
-    running: true, canceled: false, total: list.length, done: 0, ok: 0, failed: 0,
+    running: true, canceled: false, total: list.length, done: 0, alive: 0, flagged: 0, failed: 0,
     current: '', startedAt: new Date().toISOString(), finishedAt: null, lastError: '',
   });
   // По умолчанию — как основная очередь (MAX_CONCURRENT). Сбор легче коммента,
@@ -89,7 +102,7 @@ function rebuild(uuids, opts = {}) {
       state.running = false;
       state.current = '';
       state.finishedAt = new Date().toISOString();
-      logger.info(`[whitelist] Пересбор завершён: ok=${state.ok}, ошибок=${state.failed} из ${state.total}`, 'whitelist');
+      logger.info(`[whitelist] Пересбор завершён: живых=${state.alive}, проблемных=${state.flagged}, ошибок=${state.failed} из ${state.total}`, 'whitelist');
     });
 
   return { started: true, total: list.length };

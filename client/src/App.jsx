@@ -192,8 +192,8 @@ function Operation({
   const [submitting, setSubmitting] = useState(false)
   const [search, setSearch] = useState('')
   const [tagFilter, setTagFilter] = useState('')
-  // Прогресс разового пересбора белого списка (имена/ID из FB).
-  const [wl, setWl] = useState({ running: false, done: 0, total: 0, ok: 0, failed: 0 })
+  // Прогресс разового пересбора белого списка (имена/ID + статус из FB).
+  const [wl, setWl] = useState({ running: false, done: 0, total: 0, alive: 0, flagged: 0, failed: 0 })
   // Режим 2: один пост -> много фейков (каждый со своим тегом/фейком/комментом/картинкой).
   const [post2, setPost2] = useState(saved.post2 || '')
   const [entries, setEntries] = useState(saved.entries || [{
@@ -474,6 +474,11 @@ function Operation({
     </>
   )
 
+  // Короткая подпись причины пометки ⚠️ (статус аккаунта из FB).
+  const flagLabel = (reason) => (
+    { checkpoint: 'проверка', disabled: 'бан', logout: 'разлогин' }[reason] || 'проверка'
+  )
+
   const clearFlag = async (uuid) => {
     try {
       await axios.post(`${API_BASE}/api/flags/clear`, { uuid })
@@ -486,7 +491,7 @@ function Operation({
   const rebuildWhitelist = async () => {
     const uuids = filteredProfiles.map((p) => p.uuid)
     if (!uuids.length || wl.running) return
-    setWl({ running: true, done: 0, total: uuids.length, ok: 0, failed: 0 })
+    setWl({ running: true, done: 0, total: uuids.length, alive: 0, flagged: 0, failed: 0 })
     try {
       await axios.post(`${API_BASE}/api/whitelist/rebuild`, { uuids })
     } catch { /* возможно уже идёт — всё равно поллим статус */ }
@@ -547,7 +552,7 @@ function Operation({
                     onKeyDown={(e) => { if (e.key === 'Enter') setProfileUuid(p.uuid) }}
                     style={{ flex: 1, cursor: 'pointer', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}
                   >
-                    {p.flag ? '⚠️ ' : ''}{p.title}{p.tags && p.tags.length ? ` [${p.tags.join(', ')}]` : ''}
+                    {p.flag ? `⚠️ ${flagLabel(p.flag.reason)} ` : ''}{p.title}{p.tags && p.tags.length ? ` [${p.tags.join(', ')}]` : ''}
                     {p.fbName ? ` · 👤 ${p.fbName}` : ''}
                     {b ? ` — ⏳ ${b}` : ''}
                   </span>
@@ -579,11 +584,11 @@ function Operation({
               style={{ padding: '2px 10px', fontSize: '12px', flex: '0 0 auto' }}
               disabled={wl.running || !filteredProfiles.length}
               onClick={rebuildWhitelist}
-              title="Открыть эти профили по очереди и считать реальные имя и ID из FB в белый список"
+              title="Открыть эти профили по очереди: считать имя+ID из FB в белый список и проверить статус аккаунта (жив / checkpoint / бан / разлогин)"
             >
-              {wl.running ? `Собираю имена… ${wl.done}/${wl.total}` : '⟳ Собрать имена (whitelist)'}
+              {wl.running ? `Проверяю… ${wl.done}/${wl.total}` : '⟳ Собрать имена + статусы'}
             </button>
-            {wl.running && <span>ok: {wl.ok}, ошибок: {wl.failed}</span>}
+            {wl.running && <span>живых: {wl.alive || 0}, проблемных: {wl.flagged || 0}, ошибок: {wl.failed || 0}</span>}
           </div>
         </div>
       ) : (

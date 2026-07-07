@@ -184,6 +184,8 @@ async function runTask(task) {
     if (identity && (identity.fbId || identity.fbName)) {
       try { store.upsertWhitelist(task.payload.profileUuid, identity.fbId, identity.fbName); } catch { /* ignore */ }
     }
+    // Успешный коммент = аккаунт жив: снимаем возможную старую пометку ⚠️.
+    try { store.clearProfileFlag(task.payload.profileUuid); } catch { /* ignore */ }
     store.update(task.id, {
       status: store.STATUS.DONE,
       finishedAt: new Date().toISOString(),
