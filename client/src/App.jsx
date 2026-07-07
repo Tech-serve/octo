@@ -33,6 +33,21 @@ const IS_EMBEDDED = typeof window !== 'undefined' && window.self !== window.top
 const IS_LOCAL = typeof location !== 'undefined'
   && /^(localhost|127\.0\.0\.1)$/.test(location.hostname)
 
+// Синхронизация темы с таск-менеджером: родитель шлёт {type:'octobot-theme', theme},
+// а мы переключаем класс .dark на <html>. При загрузке сообщаем родителю, что готовы.
+if (typeof window !== 'undefined') {
+  window.addEventListener('message', (e) => {
+    const d = e.data
+    if (!d || d.type !== 'octobot-theme') return
+    const root = document.documentElement
+    if (d.theme === 'light') root.classList.remove('dark')
+    else root.classList.add('dark')
+  })
+  try {
+    if (window.parent && window.parent !== window) window.parent.postMessage({ type: 'octobot-ready' }, '*')
+  } catch { /* ignore */ }
+}
+
 // Показываем только профили с тегами Fakes / Sweeps (матчим по вхождению слов).
 const ALLOWED_TAGS = ['Fakes', 'Sweeps']
 const TAG_KEYWORDS = ['fake', 'sweep']
