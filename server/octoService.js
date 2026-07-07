@@ -57,7 +57,9 @@ async function listProfiles() {
   const all = [];
 
   for (let page = 0; page < maxPages; page++) {
-    const url = `${config.octoCloudApi}/profiles?page_len=${pageLen}&page=${page}&fields=title,tags,notes,description`;
+    // Без фильтра fields — Octo отдаёт полный профиль (включая описание/notes,
+    // как бы поле ни называлось). Фильтр с неизвестным полем Octo отвергает.
+    const url = `${config.octoCloudApi}/profiles?page_len=${pageLen}&page=${page}`;
     // eslint-disable-next-line no-await-in-loop
     const response = await axios.get(url, { headers, timeout: 20000 });
 
