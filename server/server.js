@@ -120,12 +120,13 @@ app.post('/api/tasks', ownerMiddleware, (req, res) => {
     const gapMin = config.mode3GapMinMs;
     const gapMax = Math.max(config.mode3GapMaxMs, gapMin);
     const spread = config.mode2SpreadMs;
+    const minOff = config.mode2MinMs;
     const allCreated = [];
 
     clean.forEach((d, di) => {
       const dialogId = crypto.randomUUID();
-      // Старт диалога: первый — сразу, следующие — со случайным разбросом.
-      let cursor = reqNow + (di === 0 ? 0 : Math.round(Math.random() * spread));
+      // Старт диалога: первый — сразу, следующие — не раньше MODE2_MIN и до разброса.
+      let cursor = reqNow + (di === 0 ? 0 : minOff + Math.round(Math.random() * Math.max(0, spread - minOff)));
       cursor = queue.earliestSlot(d.steps[0].profileUuid, cursor, reqNow);
       const stepTasks = [];
 
@@ -212,12 +213,13 @@ app.post('/api/tasks', ownerMiddleware, (req, res) => {
 
     const reqNow = Date.now();
     const spread = config.mode2SpreadMs;
+    const minOff = config.mode2MinMs;
 
     const created = list.map((e, idx) => {
       // Первый фейк — СРАЗУ (не ждём). Остальные — в случайный момент в окне
-      // [0, MODE2_SPREAD] минут (кто через минуту, кто через час). Но не раньше,
-      // чем сам фейк освободится.
-      const offset = idx === 0 ? 0 : Math.round(Math.random() * spread);
+      // [MODE2_MIN, MODE2_SPREAD] минут: не раньше минимума (чтобы не стартовали
+      // одновременно с первым) и не позже разброса. И не раньше, чем сам фейк освободится.
+      const offset = idx === 0 ? 0 : minOff + Math.round(Math.random() * Math.max(0, spread - minOff));
       const scheduledAt = queue.earliestSlot(e.profileUuid, reqNow + offset, reqNow);
 
       let imagePath = null;
