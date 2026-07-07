@@ -34,6 +34,14 @@ function extractTags(tags) {
     .filter(Boolean);
 }
 
+// Имя аккаунта на FB берём из описания профиля Octo (обычно "почта | пароль [Имя]").
+// Берём текст в квадратных скобках. Это же имя = запись в белом списке.
+function parseFbName(desc) {
+  if (!desc || typeof desc !== 'string') return '';
+  const m = desc.match(/\[([^\]]+)\]/);
+  return m ? m[1].trim() : '';
+}
+
 // Получить ВСЕ профили из облачного API Octo, проходя по всем страницам.
 // Возвращает [{ uuid, title, tags: [] }]. Нужен API-токен.
 async function listProfiles() {
@@ -49,7 +57,7 @@ async function listProfiles() {
   const all = [];
 
   for (let page = 0; page < maxPages; page++) {
-    const url = `${config.octoCloudApi}/profiles?page_len=${pageLen}&page=${page}&fields=title,tags`;
+    const url = `${config.octoCloudApi}/profiles?page_len=${pageLen}&page=${page}&fields=title,tags,notes,description`;
     // eslint-disable-next-line no-await-in-loop
     const response = await axios.get(url, { headers, timeout: 20000 });
 
@@ -59,7 +67,13 @@ async function listProfiles() {
 
     for (const p of raw) {
       if (!p || !p.uuid) continue;
-      all.push({ uuid: p.uuid, title: p.title || p.name || p.uuid, tags: extractTags(p.tags) });
+      const desc = p.description || p.notes || p.note || '';
+      all.push({
+        uuid: p.uuid,
+        title: p.title || p.name || p.uuid,
+        tags: extractTags(p.tags),
+        fbName: parseFbName(desc),
+      });
     }
 
     if (raw.length < pageLen) break; // последняя страница

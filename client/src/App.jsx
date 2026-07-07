@@ -466,13 +466,12 @@ function Operation({
           .filter((p) => !searchStr || (p.title || '').toLowerCase().includes(String(searchStr).toLowerCase()))
           .map((p) => {
             const b = profileBusy(p.uuid)
-            return <option key={p.uuid} value={p.uuid}>{p.flag ? '⚠️ ' : ''}{p.title}{b ? ` — ${b}` : ''}</option>
+            return <option key={p.uuid} value={p.uuid}>{p.flag ? '⚠️ ' : ''}{p.title}{p.fbName ? ` · ${p.fbName}` : ''}{b ? ` — ${b}` : ''}</option>
           })}
       </select>
     </>
   )
 
-  const flagged = profiles.filter((p) => p.flag)
   const clearFlag = async (uuid) => {
     try {
       await axios.post(`${API_BASE}/api/flags/clear`, { uuid })
@@ -507,11 +506,6 @@ function Operation({
             </button>
           </div>
 
-          {flagged.length > 0 && (
-            <div className="tm-warn" style={{ fontSize: '12px' }}>
-              ⚠️ Требуют проверки (checkpoint): пройди подтверждение в Octo под фейком и нажми «проверено».
-            </div>
-          )}
           <div className="tm-list" role="listbox">
             {filteredProfiles.length === 0 && <div className="tm-list-empty">— Ничего не найдено —</div>}
             {filteredProfiles.map((p) => {
@@ -532,6 +526,7 @@ function Operation({
                     style={{ flex: 1, cursor: 'pointer', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}
                   >
                     {p.flag ? '⚠️ ' : ''}{p.title}{p.tags && p.tags.length ? ` [${p.tags.join(', ')}]` : ''}
+                    {p.fbName ? ` · 👤 ${p.fbName}` : ''}
                     {b ? ` — ⏳ ${b}` : ''}
                   </span>
                   {p.flag && (
