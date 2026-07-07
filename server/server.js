@@ -8,6 +8,7 @@ const config = require('./config');
 const { logger } = require('./logger');
 const store = require('./taskStore');
 const queue = require('./queue');
+const whitelistJob = require('./whitelistJob');
 const { listProfiles } = require('./octoService');
 const { uniquifyBatch } = require('./textDecorator');
 const { handleSsoAccept, ownerMiddleware, whoAmI } = require('./auth');
@@ -58,7 +59,18 @@ app.get('/api/profiles', ownerMiddleware, async (req, res) => {
   try {
     const profiles = await listProfiles();
     const flags = store.listFlags();
-    res.json({ profiles: profiles.map((p) => ({ ...p, flag: flags[p.uuid] || null })) });
+    const whitelist = store.listWhitelist();
+    res.json({
+      profiles: profiles.map((p) => {
+        const wl = whitelist[p.uuid];
+        return {
+          ...p,
+          flag: flags[p.uuid] || null,
+          fbName: (wl && wl.fbName) || '',
+          fbId: (wl && wl.fbId) || '',
+        };
+      }),
+    });
   } catch (err) {
     if (err.code === 'NO_TOKEN') {
       return res.status(200).json({ profiles: [], tokenMissing: true, error: err.message });
@@ -373,6 +385,31 @@ app.post('/api/flags/clear', ownerMiddleware, (req, res) => {
   if (!uuid) return res.status(400).json({ error: 'uuid обязателен' });
   store.clearProfileFlag(uuid);
   res.json({ ok: true });
+});
+
+// Разовый пересбор белого списка: открывает переданные профили по очереди,
+// читает реальную FB-идентичность (id+имя) и пишет в whitelist. Скоуп задаёт
+// фронт (обычно — текущий отфильтрованный список фейков). Запуск фоновый.
+app.post('/api/whitelist/rebuild', ownerMiddleware, (req, res) => {
+  const uuids = (req.body && Array.isArray(req.body.uuids)) ? req.body.uuids : [];
+  const result = whitelistJob.rebuild(uuids, { concurrency: req.body && req.body.concurrency });
+  if (!result.started) {
+    const msg = result.reason === 'already-running'
+      ? 'Пересбор уже идёт'
+      : 'Список профилей пуст';
+    return res.status(409).json({ error: msg, ...result });
+  }
+  res.json({ ok: true, ...result });
+});
+
+// Прогресс пересбора белого списка (для поллинга с фронта).
+app.get('/api/whitelist/status', ownerMiddleware, (req, res) => {
+  res.json(whitelistJob.status());
+});
+
+// Остановить пересбор.
+app.post('/api/whitelist/cancel', ownerMiddleware, (req, res) => {
+  res.json({ canceled: whitelistJob.cancel() });
 });
 
 // Статус конкретной задачи (для поллинга с фронта). Только своя задача.

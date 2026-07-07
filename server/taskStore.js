@@ -57,6 +57,20 @@ db.exec(`
   );
 `);
 
+// Белый список фейков: реальные FB-идентичности, захваченные из самой FB-сессии
+// (id из куки c_user, имя из CurrentUserInitialData). id — для точного матчинга
+// в модерации, имя — для показа в селекте. Обновляется при каждом использовании
+// фейка и разовым пересбором. Общий для всех баеров (фейки — общий пул).
+db.exec(`
+  CREATE TABLE IF NOT EXISTS fb_whitelist (
+    profile_uuid TEXT PRIMARY KEY,
+    fb_id        TEXT,
+    fb_name      TEXT,
+    updated_at   TEXT NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS idx_whitelist_fbid ON fb_whitelist(fb_id);
+`);
+
 // Строку БД -> объект задачи привычной формы (с payload).
 function rowToTask(r) {
   if (!r) return null;
@@ -227,7 +241,41 @@ function listFlags() {
   return out;
 }
 
+const wlUpsertStmt = db.prepare(`
+  INSERT INTO fb_whitelist (profile_uuid, fb_id, fb_name, updated_at)
+  VALUES (?, ?, ?, ?)
+  ON CONFLICT(profile_uuid) DO UPDATE SET
+    fb_id = excluded.fb_id,
+    fb_name = excluded.fb_name,
+    updated_at = excluded.updated_at
+`);
+const wlListStmt = db.prepare('SELECT * FROM fb_whitelist');
+
+// Записать/обновить FB-идентичность фейка. Пустые значения не затирают уже
+// сохранённые (напр. имя не считалось — оставляем прежнее).
+function upsertWhitelist(uuid, fbId, fbName) {
+  if (!uuid || (!fbId && !fbName)) return;
+  const cur = getWhitelist(uuid);
+  const id = fbId || (cur && cur.fbId) || '';
+  const name = fbName || (cur && cur.fbName) || '';
+  wlUpsertStmt.run(uuid, id, name, new Date().toISOString());
+}
+const wlGetStmt = db.prepare('SELECT * FROM fb_whitelist WHERE profile_uuid = ?');
+function getWhitelist(uuid) {
+  const r = wlGetStmt.get(uuid);
+  return r ? { fbId: r.fb_id || '', fbName: r.fb_name || '', updatedAt: r.updated_at } : null;
+}
+// { uuid: { fbId, fbName, updatedAt } } — весь белый список.
+function listWhitelist() {
+  const out = {};
+  for (const r of wlListStmt.all()) {
+    out[r.profile_uuid] = { fbId: r.fb_id || '', fbName: r.fb_name || '', updatedAt: r.updated_at };
+  }
+  return out;
+}
+
 module.exports = {
   STATUS, createTask, update, get, toPublic, list, loadPending, countSameForProfile, pruneOld,
   flagProfile, clearProfileFlag, listFlags,
+  upsertWhitelist, getWhitelist, listWhitelist,
 };

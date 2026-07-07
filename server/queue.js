@@ -179,7 +179,11 @@ async function runTask(task) {
   taskLog.info(`Старт задачи. Профиль=${task.payload.profileUuid}, пост=${task.payload.postUrl}`);
 
   try {
-    await leaveFacebookComment(task.payload, taskLog, handle);
+    const identity = await leaveFacebookComment(task.payload, taskLog, handle);
+    // Обновляем белый список реальной FB-идентичностью фейка (id + имя из сессии).
+    if (identity && (identity.fbId || identity.fbName)) {
+      try { store.upsertWhitelist(task.payload.profileUuid, identity.fbId, identity.fbName); } catch { /* ignore */ }
+    }
     store.update(task.id, {
       status: store.STATUS.DONE,
       finishedAt: new Date().toISOString(),

@@ -34,53 +34,21 @@ function extractTags(tags) {
     .filter(Boolean);
 }
 
-// Имя аккаунта на FB берём из описания профиля Octo (формат "почта | пароль [Имя]").
-// Берём текст в квадратных скобках. Это же имя = запись в белом списке.
-// Ищем сначала в явных полях описания, затем в любом строковом поле профиля
-// (на случай если API называет поле иначе).
-function parseFbName(profile) {
-  if (!profile || typeof profile !== 'object') return '';
-  const dec = (x) => { try { return decodeURIComponent(String(x).replace(/\+/g, ' ')); } catch { return String(x); } };
-  // «Похоже на имя»: буквы (в т.ч. кириллица), пробел, точка, дефис, апостроф.
-  const looksName = (s) => typeof s === 'string' && /^[\p{L}][\p{L}.\-'\s]{0,40}$/u.test(s.trim());
-
-  const strs = [];
-  for (const k of ['description', 'notes', 'note']) if (typeof profile[k] === 'string') strs.push(profile[k]);
-  for (const v of Object.values(profile)) if (typeof v === 'string') strs.push(v);
-
-  for (const s of strs) {
-    // 1) Имя в квадратных скобках: "... [Имя Фамилия] ..."
-    const br = s.match(/\[([^\]]+)\]/);
-    if (br) return br[1].trim();
-    // 2) Из URL генератора паспорта: "?name=Darya&surname=Kalinina"
-    const nm = s.match(/[?&]name=([^&|#\s]+)/i);
-    if (nm) {
-      const sn = s.match(/[?&]surname=([^&|#\s]+)/i);
-      const full = [dec(nm[1]), sn ? dec(sn[1]) : ''].map((x) => x.trim()).filter(Boolean).join(' ');
-      if (full) return full;
-    }
-    // 3) Пайп-формат: "...|почта|пароль|Имя|Фамилия|..." — имя идёт сразу после почты.
-    if (s.includes('|')) {
-      const parts = s.split('|');
-      const ei = parts.findIndex((x) => /@/.test(x));
-      if (ei >= 0 && looksName(parts[ei + 2]) && looksName(parts[ei + 3])) {
-        return `${parts[ei + 2].trim()} ${parts[ei + 3].trim()}`;
-      }
-    }
-  }
-  return '';
-}
-
 // Получить ВСЕ профили из облачного API Octo, проходя по всем страницам.
 // Возвращает [{ uuid, title, tags: [] }]. Нужен API-токен.
-async function fetchAllProfiles(fields) {
+async function listProfiles() {
+  if (!config.octoApiToken) {
+    const err = new Error('Не задан OCTO_API_TOKEN — список профилей недоступен. Введите UUID вручную.');
+    err.code = 'NO_TOKEN';
+    throw err;
+  }
   const pageLen = 100;
   const maxPages = 500; // предохранитель (до 50 000 профилей)
   const headers = { 'X-Octo-Api-Token': config.octoApiToken };
   const all = [];
 
   for (let page = 0; page < maxPages; page++) {
-    const url = `${config.octoCloudApi}/profiles?page_len=${pageLen}&page=${page}&fields=${fields}`;
+    const url = `${config.octoCloudApi}/profiles?page_len=${pageLen}&page=${page}&fields=title,tags`;
     // eslint-disable-next-line no-await-in-loop
     const response = await axios.get(url, { headers, timeout: 20000 });
 
@@ -94,7 +62,6 @@ async function fetchAllProfiles(fields) {
         uuid: p.uuid,
         title: p.title || p.name || p.uuid,
         tags: extractTags(p.tags),
-        fbName: parseFbName(p),
       });
     }
 
@@ -104,26 +71,37 @@ async function fetchAllProfiles(fields) {
   return all;
 }
 
-async function listProfiles() {
-  if (!config.octoApiToken) {
-    const err = new Error('Не задан OCTO_API_TOKEN — список профилей недоступен. Введите UUID вручную.');
-    err.code = 'NO_TOKEN';
-    throw err;
-  }
-  // Всегда запрашиваем title,tags (теги гарантированно работают). Плюс пытаемся
-  // добрать поле описания — в разных версиях API оно зовётся по-разному, а
-  // неизвестное поле Octo отвергает целиком. Поэтому пробуем по очереди и
-  // откатываемся на безопасный набор — теги/список при этом не ломаются.
-  let lastErr;
-  for (const fields of ['title,tags,description', 'title,tags,notes', 'title,tags']) {
-    try {
-      // eslint-disable-next-line no-await-in-loop
-      return await fetchAllProfiles(fields);
-    } catch (e) {
-      lastErr = e;
+// Прочитать реальную FB-идентичность залогиненного профиля прямо из открытой
+// страницы: id — из куки c_user (надёжно), имя — из CurrentUserInitialData,
+// которую FB встраивает в inline-скрипты. Навигация не нужна — читаем с текущей
+// FB-страницы. Возвращает { fbId, fbName } (любое поле может быть пустым).
+async function readFbIdentity(page) {
+  const out = { fbId: '', fbName: '' };
+  try {
+    const cookies = await page.context().cookies('https://www.facebook.com');
+    const cu = cookies.find((c) => c.name === 'c_user');
+    if (cu && cu.value) out.fbId = cu.value;
+  } catch { /* нет доступа к кукам — id останется пустым */ }
+
+  try {
+    const parsed = await page.evaluate(() => {
+      const decode = (s) => { try { return JSON.parse(`"${s}"`); } catch { return s; } };
+      for (const sc of Array.from(document.scripts)) {
+        const t = sc.textContent || '';
+        if (!t.includes('CurrentUserInitialData')) continue;
+        const idm = t.match(/"USER_ID":"(\d+)"/);
+        const nm = t.match(/"NAME":"((?:[^"\\]|\\.)*)"/);
+        return { id: idm ? idm[1] : '', name: nm ? decode(nm[1]) : '' };
+      }
+      return { id: '', name: '' };
+    });
+    if (parsed) {
+      if (!out.fbId && parsed.id) out.fbId = parsed.id;
+      if (parsed.name) out.fbName = parsed.name;
     }
-  }
-  throw lastErr;
+  } catch { /* скрипт не найден — имя останется пустым */ }
+
+  return out;
 }
 
 async function connectToOcto(profileUuid, log) {
@@ -167,4 +145,4 @@ async function disconnectOcto(profileUuid, log) {
   }
 }
 
-module.exports = { connectToOcto, disconnectOcto, listProfiles };
+module.exports = { connectToOcto, disconnectOcto, listProfiles, readFbIdentity };

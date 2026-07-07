@@ -1,5 +1,5 @@
 const fs = require('fs');
-const { connectToOcto, disconnectOcto } = require('./octoService');
+const { connectToOcto, disconnectOcto, readFbIdentity } = require('./octoService');
 const config = require('./config');
 const {
   sleep, rand, randInt,
@@ -418,6 +418,19 @@ async function leaveFacebookComment(payload, log, handle = {}) {
     } else {
       log.warn('[FB Bot] Текст всё ещё в поле — возможно, комментарий не отправился (проверьте вручную)');
     }
+
+    // Захват реальной FB-идентичности (id из c_user, имя из страницы) — для
+    // белого списка. Сессия сейчас гарантированно валидна и на FB-странице.
+    let identity = { fbId: '', fbName: '' };
+    try {
+      identity = await readFbIdentity(page);
+      if (identity.fbId || identity.fbName) {
+        log.info(`[FB Bot] FB-идентичность: id=${identity.fbId || '—'}, имя=${identity.fbName || '—'}`);
+      }
+    } catch (e) {
+      log.warn(`[FB Bot] Не удалось прочитать FB-идентичность: ${e.message}`);
+    }
+    return identity;
   } finally {
     if (profileUuid) await disconnectOcto(profileUuid, log);
     // Картинку НЕ удаляем — она нужна для истории/просмотра (раздаётся статикой).

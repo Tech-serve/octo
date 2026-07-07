@@ -192,6 +192,8 @@ function Operation({
   const [submitting, setSubmitting] = useState(false)
   const [search, setSearch] = useState('')
   const [tagFilter, setTagFilter] = useState('')
+  // Прогресс разового пересбора белого списка (имена/ID из FB).
+  const [wl, setWl] = useState({ running: false, done: 0, total: 0, ok: 0, failed: 0 })
   // Режим 2: один пост -> много фейков (каждый со своим тегом/фейком/комментом/картинкой).
   const [post2, setPost2] = useState(saved.post2 || '')
   const [entries, setEntries] = useState(saved.entries || [{
@@ -479,6 +481,26 @@ function Operation({
     } catch { /* пропустим */ }
   }
 
+  // Разовый пересбор whitelist: открыть видимые сейчас профили по очереди и
+  // считать из FB реальные имя+ID. Прогресс поллим, по завершении — обновить список.
+  const rebuildWhitelist = async () => {
+    const uuids = filteredProfiles.map((p) => p.uuid)
+    if (!uuids.length || wl.running) return
+    setWl({ running: true, done: 0, total: uuids.length, ok: 0, failed: 0 })
+    try {
+      await axios.post(`${API_BASE}/api/whitelist/rebuild`, { uuids })
+    } catch { /* возможно уже идёт — всё равно поллим статус */ }
+    const poll = async () => {
+      try {
+        const { data } = await axios.get(`${API_BASE}/api/whitelist/status`)
+        setWl(data)
+        if (data.running) setTimeout(poll, 3000)
+        else loadProfiles()
+      } catch { setTimeout(poll, 4000) }
+    }
+    poll()
+  }
+
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: '15px' }}>
       {mode === 1 && (
@@ -549,7 +571,20 @@ function Operation({
             <div className="tm-warn" style={{ fontSize: '13px' }}>⏳ Этот фейк {profileBusy(profileUuid)}</div>
           )}
 
-          <div className="tm-muted">Показано {filteredProfiles.length} из {source.length}</div>
+          <div className="tm-muted" style={{ display: 'flex', alignItems: 'center', gap: '10px', flexWrap: 'wrap' }}>
+            <span>Показано {filteredProfiles.length} из {source.length}</span>
+            <button
+              type="button"
+              className="tm-btn tm-btn-outline"
+              style={{ padding: '2px 10px', fontSize: '12px', flex: '0 0 auto' }}
+              disabled={wl.running || !filteredProfiles.length}
+              onClick={rebuildWhitelist}
+              title="Открыть эти профили по очереди и считать реальные имя и ID из FB в белый список"
+            >
+              {wl.running ? `Собираю имена… ${wl.done}/${wl.total}` : '⟳ Собрать имена (whitelist)'}
+            </button>
+            {wl.running && <span>ok: {wl.ok}, ошибок: {wl.failed}</span>}
+          </div>
         </div>
       ) : (
         <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
