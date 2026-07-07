@@ -61,8 +61,10 @@ async function main() {
   const wl = store.listWhitelist();
   const flags = store.listFlags();
 
-  // Берём: кого НЕТ в whitelist (нет имени) ИЛИ статус «ошибка» (перепроверяем).
-  const needsCheck = (p) => !wl[p.uuid] || (flags[p.uuid] && flags[p.uuid].reason === 'error');
+  // Берём: кого НЕТ в whitelist (нет имени) ИЛИ статус «ошибка»/«прокси»
+  // (перепроверяем — оба технические и могут пройти со второго раза).
+  const retryReasons = new Set(['error', 'proxy']);
+  const needsCheck = (p) => !wl[p.uuid] || (flags[p.uuid] && retryReasons.has(flags[p.uuid].reason));
 
   let todo = all;
   if (!args.all) todo = todo.filter(needsCheck);
@@ -74,8 +76,23 @@ async function main() {
   if (args.tag) console.log(`Фильтр по тегу: "${args.tag}"`);
   if (!todo.length) { console.log('Нечего проверять.'); process.exit(0); }
 
+  // Классифицируем причину ошибки открытия по тексту исключения.
+  //  proxy    — мёртвый/недоступный прокси профиля (нужен ремонт прокси);
+  //  overload — перегруз: CDP-таймаут / браузер закрылся посреди работы (ретраится);
+  //  octo     — Octo отказал в запуске (лимит/занят/перенесён — текст в скобках);
+  //  error    — прочее.
+  const classify = (msg) => {
+    if (/SOCKS|PROXY|ERR_PROXY|ERR_SOCKS|ERR_TUNNEL/i.test(msg)) return 'proxy';
+    if (/connectOverCDP|Timeout \d+ms|has been closed|newPage/i.test(msg)) return 'overload';
+    if (/Octo отказал|status code|ws_endpoint/i.test(msg)) return 'octo';
+    return 'error';
+  };
+
   const concurrency = Math.max(1, args.concurrency);
-  const results = { ok: [], checkpoint: [], disabled: [], logout: [], error: [] };
+  const results = {
+    ok: [], checkpoint: [], disabled: [], logout: [],
+    proxy: [], overload: [], octo: [], error: [],
+  };
   let idx = 0;
   let done = 0;
 
@@ -88,8 +105,10 @@ async function main() {
         const r = await checkOne(p.uuid);
         (results[r.status] || results.error).push({ title: p.title, name: r.name });
       } catch (e) {
-        try { store.flagProfile(p.uuid, 'error'); } catch { /* ignore */ }
-        results.error.push({ title: p.title, error: e.message });
+        const kind = classify(e.message || '');
+        // Прокси метим отдельным статусом, остальные технические — как «ошибка».
+        try { store.flagProfile(p.uuid, kind === 'proxy' ? 'proxy' : 'error'); } catch { /* ignore */ }
+        results[kind].push({ title: p.title, error: (e.message || '').replace(/\s+/g, ' ').slice(0, 120) });
       } finally {
         done += 1;
         process.stdout.write(`\r[${done}/${todo.length}] ${(p.title || '').slice(0, 40).padEnd(42)}`);
@@ -105,11 +124,14 @@ async function main() {
     checkpoint: 'CHECKPOINT / требуют проверки',
     disabled: 'БАН (аккаунт отключён)',
     logout: 'РАЗЛОГИН (сессия слетела)',
-    error: 'ОШИБКА ОТКРЫТИЯ (перепроверить)',
+    proxy: 'ПРОКСИ мёртвый/недоступен (чинить прокси)',
+    overload: 'ПЕРЕГРУЗ / CDP (перепроверить, снизь --concurrency)',
+    octo: 'OCTO ОТКАЗАЛ В ЗАПУСКЕ (см. причину)',
+    error: 'ПРОЧЕЕ (перепроверить)',
   };
   console.log('\n\n===== ИТОГ =====');
   console.log(`Живых: ${results.ok.length}`);
-  for (const key of ['checkpoint', 'disabled', 'logout', 'error']) {
+  for (const key of ['checkpoint', 'disabled', 'logout', 'proxy', 'overload', 'octo', 'error']) {
     const list = results[key];
     if (!list.length) continue;
     console.log(`\n${labels[key]}: ${list.length}`);

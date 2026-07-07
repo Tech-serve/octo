@@ -136,11 +136,23 @@ async function detectAccountStatus(page) {
 
 async function connectToOcto(profileUuid, log) {
   log.info(`[Octo] Запуск профиля ${profileUuid}...`);
-  const response = await axios.post(`${OCTO_LOCAL_API}/start`, {
-    uuid: profileUuid,
-    headless: config.headless,
-    debug_port: true,
-  });
+  let response;
+  try {
+    response = await axios.post(`${OCTO_LOCAL_API}/start`, {
+      uuid: profileUuid,
+      headless: config.headless,
+      debug_port: true,
+    });
+  } catch (e) {
+    // Достаём реальную причину из тела ответа Octo (msg/error/message), а не
+    // просто «status code 400» — так видно, что именно не так (лимит/прокси/…).
+    const body = e.response && e.response.data;
+    let detail = e.message;
+    if (body) detail = body.msg || body.error || body.message || (typeof body === 'string' ? body : JSON.stringify(body));
+    const err = new Error(`Octo отказал в запуске: ${detail}`);
+    err.octoStatus = e.response && e.response.status;
+    throw err;
+  }
 
   // Octo возвращает поле ws_endpoint (оставляем ws как запасной вариант для совместимости)
   const wsEndpoint = response.data.ws_endpoint || response.data.ws;
@@ -149,7 +161,7 @@ async function connectToOcto(profileUuid, log) {
   }
   log.info('[Octo] Профиль запущен. Подключаем Playwright...');
 
-  const browser = await chromium.connectOverCDP(wsEndpoint);
+  const browser = await chromium.connectOverCDP(wsEndpoint, { timeout: config.cdpConnectTimeoutMs });
   const contexts = browser.contexts();
   const context = contexts[0] || (await browser.newContext());
   const page = context.pages()[0] || (await context.newPage());

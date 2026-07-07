@@ -474,7 +474,7 @@ function Operation({
 
   // Короткая подпись причины пометки ⚠️ (статус аккаунта из FB).
   const flagLabel = (reason) => (
-    { checkpoint: 'проверка', disabled: 'бан', logout: 'разлогин', error: 'ошибка' }[reason] || 'проверка'
+    { checkpoint: 'проверка', disabled: 'бан', logout: 'разлогин', proxy: 'прокси', error: 'ошибка' }[reason] || 'проверка'
   )
 
   const clearFlag = async (uuid) => {

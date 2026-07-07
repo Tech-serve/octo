@@ -56,6 +56,9 @@ const config = {
   headless: bool(process.env.HEADLESS, false),
   navTimeout: int(process.env.NAV_TIMEOUT, 60000),
   selectorTimeout: int(process.env.SELECTOR_TIMEOUT, 15000),
+  // Таймаут подключения Playwright к уже запущенному профилю по CDP. Дефолт
+  // Playwright — 30с; под нагрузкой много профилей не успевают, поэтому терпимее.
+  cdpConnectTimeoutMs: int(process.env.CDP_CONNECT_TIMEOUT, 60000),
   // Блокировать загрузку ТОЛЬКО видео (картинки грузятся). Экономит RAM/CPU/трафик
   // на 10 параллельных профилях. Отключить: BLOCK_VIDEO=false.
   blockVideo: bool(process.env.BLOCK_VIDEO, true),
