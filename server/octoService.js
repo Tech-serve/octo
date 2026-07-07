@@ -34,12 +34,24 @@ function extractTags(tags) {
     .filter(Boolean);
 }
 
-// Имя аккаунта на FB берём из описания профиля Octo (обычно "почта | пароль [Имя]").
+// Имя аккаунта на FB берём из описания профиля Octo (формат "почта | пароль [Имя]").
 // Берём текст в квадратных скобках. Это же имя = запись в белом списке.
-function parseFbName(desc) {
-  if (!desc || typeof desc !== 'string') return '';
-  const m = desc.match(/\[([^\]]+)\]/);
-  return m ? m[1].trim() : '';
+// Ищем сначала в явных полях описания, затем в любом строковом поле профиля
+// (на случай если API называет поле иначе).
+function parseFbName(profile) {
+  if (!profile || typeof profile !== 'object') return '';
+  const pick = (s) => {
+    if (typeof s !== 'string') return '';
+    const m = s.match(/\[([^\]]+)\]/);
+    return m ? m[1].trim() : '';
+  };
+  const direct = pick(profile.description) || pick(profile.notes) || pick(profile.note);
+  if (direct) return direct;
+  for (const v of Object.values(profile)) {
+    const got = pick(v);
+    if (got) return got;
+  }
+  return '';
 }
 
 // Получить ВСЕ профили из облачного API Octo, проходя по всем страницам.
@@ -69,12 +81,11 @@ async function listProfiles() {
 
     for (const p of raw) {
       if (!p || !p.uuid) continue;
-      const desc = p.description || p.notes || p.note || '';
       all.push({
         uuid: p.uuid,
         title: p.title || p.name || p.uuid,
         tags: extractTags(p.tags),
-        fbName: parseFbName(desc),
+        fbName: parseFbName(p),
       });
     }
 
