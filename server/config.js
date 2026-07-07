@@ -71,8 +71,8 @@ const config = {
   mode3GapMaxMs: Math.max(0, num(process.env.MODE3_GAP_MAX, 5)) * 60000,
   // Минимальный зазор между задачами ОДНОГО фейка (умное заполнение окон):
   // новая задача встаёт в самое раннее окно, где до соседних задач ≥ этого.
-  minFakeGapMinMs: Math.max(0, num(process.env.MIN_FAKE_GAP_MIN, 2)) * 60000,
-  minFakeGapMaxMs: Math.max(0, num(process.env.MIN_FAKE_GAP_MAX, 5)) * 60000,
+  minFakeGapMinMs: Math.max(0, num(process.env.MIN_FAKE_GAP_MIN, 1)) * 60000,
+  minFakeGapMaxMs: Math.max(0, num(process.env.MIN_FAKE_GAP_MAX, 3)) * 60000,
 
   // Авторизация. Выключена (standalone) — работает как раньше, без входа,
   // владелец задач = 'local'. Включена (встроен в таск-менеджер) — приходит

@@ -96,7 +96,12 @@ function varyImage(dataUrl) {
       const cb = Math.round(H * rnd(0, 0.06))
       const sw = Math.max(8, W - cl - cr)
       const sh = Math.max(8, H - ct - cb)
-      const scale = rnd(0.9, 1.0)
+      // Ограничиваем итоговый размер: большие фото давали тяжёлый base64, и
+      // туннель рвал загрузку запроса ("request aborted"/502). Ужимаем длинную
+      // сторону до MAX_DIM — картинка лёгкая, грузится надёжно, визуально та же.
+      const MAX_DIM = 1280
+      const fit = Math.min(1, MAX_DIM / Math.max(sw, sh))
+      const scale = rnd(0.9, 1.0) * fit
       const dw = Math.max(8, Math.round(sw * scale))
       const dh = Math.max(8, Math.round(sh * scale))
       const canvas = document.createElement('canvas')
@@ -108,7 +113,7 @@ function varyImage(dataUrl) {
         + `saturate(${rnd(0.92, 1.08).toFixed(3)}) `
         + `hue-rotate(${rnd(-4, 4).toFixed(1)}deg)`
       ctx.drawImage(img, cl, ct, sw, sh, 0, 0, dw, dh)
-      resolve(canvas.toDataURL('image/jpeg', rnd(0.86, 0.94)))
+      resolve(canvas.toDataURL('image/jpeg', rnd(0.78, 0.82)))
     }
     img.onerror = () => resolve(dataUrl)
     img.src = dataUrl
