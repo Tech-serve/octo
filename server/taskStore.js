@@ -47,6 +47,16 @@ for (const alter of [
   try { db.exec(alter); } catch { /* колонка уже есть */ }
 }
 
+// Пометки фейков, требующих ручного вмешательства (checkpoint FB и т.п.).
+// Общие для всех баеров — фейки это общий пул.
+db.exec(`
+  CREATE TABLE IF NOT EXISTS profile_flags (
+    profile_uuid TEXT PRIMARY KEY,
+    reason       TEXT,
+    flagged_at   TEXT NOT NULL
+  );
+`);
+
 // Строку БД -> объект задачи привычной формы (с payload).
 function rowToTask(r) {
   if (!r) return null;
@@ -193,6 +203,31 @@ function pruneOld(days = 30) {
   return rows.map((r) => r.image_path).filter(Boolean);
 }
 
+const flagInsertStmt = db.prepare(
+  'INSERT OR REPLACE INTO profile_flags (profile_uuid, reason, flagged_at) VALUES (?, ?, ?)',
+);
+const flagDeleteStmt = db.prepare('DELETE FROM profile_flags WHERE profile_uuid = ?');
+const flagListStmt = db.prepare('SELECT * FROM profile_flags');
+
+// Пометить фейк как требующий вмешательства (напр. checkpoint).
+function flagProfile(uuid, reason) {
+  if (!uuid) return;
+  flagInsertStmt.run(uuid, reason || 'checkpoint', new Date().toISOString());
+}
+// Снять пометку (баер подтвердил, что аккаунт проверен).
+function clearProfileFlag(uuid) {
+  flagDeleteStmt.run(uuid);
+}
+// { uuid: { reason, flaggedAt } } — все текущие пометки.
+function listFlags() {
+  const out = {};
+  for (const r of flagListStmt.all()) {
+    out[r.profile_uuid] = { reason: r.reason, flaggedAt: r.flagged_at };
+  }
+  return out;
+}
+
 module.exports = {
   STATUS, createTask, update, get, toPublic, list, loadPending, countSameForProfile, pruneOld,
+  flagProfile, clearProfileFlag, listFlags,
 };

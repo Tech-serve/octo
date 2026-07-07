@@ -57,7 +57,8 @@ function saveImage(dataUrl) {
 app.get('/api/profiles', ownerMiddleware, async (req, res) => {
   try {
     const profiles = await listProfiles();
-    res.json({ profiles });
+    const flags = store.listFlags();
+    res.json({ profiles: profiles.map((p) => ({ ...p, flag: flags[p.uuid] || null })) });
   } catch (err) {
     if (err.code === 'NO_TOKEN') {
       return res.status(200).json({ profiles: [], tokenMissing: true, error: err.message });
@@ -362,6 +363,14 @@ app.post('/api/tasks/cancel', ownerMiddleware, (req, res) => {
   });
   const canceled = results.filter((r) => r.result === 'canceled').length;
   res.json({ canceled, results });
+});
+
+// Снять пометку «требует проверки» с фейка (баер подтвердил checkpoint вручную).
+app.post('/api/flags/clear', ownerMiddleware, (req, res) => {
+  const uuid = req.body && req.body.uuid;
+  if (!uuid) return res.status(400).json({ error: 'uuid обязателен' });
+  store.clearProfileFlag(uuid);
+  res.json({ ok: true });
 });
 
 // Статус конкретной задачи (для поллинга с фронта). Только своя задача.

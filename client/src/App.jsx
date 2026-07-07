@@ -428,14 +428,37 @@ function Operation({
           .filter((p) => !searchStr || (p.title || '').toLowerCase().includes(String(searchStr).toLowerCase()))
           .map((p) => {
             const b = profileBusy(p.uuid)
-            return <option key={p.uuid} value={p.uuid}>{p.title}{b ? ` — ${b}` : ''}</option>
+            return <option key={p.uuid} value={p.uuid}>{p.flag ? '⚠️ ' : ''}{p.title}{b ? ` — ${b}` : ''}</option>
           })}
       </select>
     </>
   )
 
+  const flagged = profiles.filter((p) => p.flag)
+  const clearFlag = async (uuid) => {
+    try {
+      await axios.post(`${API_BASE}/api/flags/clear`, { uuid })
+      loadProfiles()
+    } catch { /* пропустим */ }
+  }
+
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: '15px' }}>
+      {flagged.length > 0 && (
+        <div className="tm-card" style={{ border: '1px solid var(--danger)', display: 'flex', flexDirection: 'column', gap: '6px' }}>
+          <div className="tm-warn" style={{ fontSize: '13px' }}>
+            ⚠️ Требуют проверки (checkpoint). Зайди в Octo под фейком, пройди подтверждение, затем нажми «проверено»:
+          </div>
+          {flagged.map((p) => (
+            <div key={p.uuid} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '10px' }}>
+              <span style={{ fontSize: '13px' }}>{p.title}</span>
+              <button type="button" className="tm-btn tm-btn-outline" style={{ padding: '4px 10px', fontSize: '12px', flex: '0 0 auto' }} onClick={() => clearFlag(p.uuid)}>
+                ✓ проверено
+              </button>
+            </div>
+          ))}
+        </div>
+      )}
       {mode === 1 && (
       <>
       {loadingProfiles ? (
@@ -475,7 +498,7 @@ function Operation({
                   className={`tm-list-item${sel ? ' active' : ''}`}
                   onClick={() => setProfileUuid(p.uuid)}
                 >
-                  {p.title}{p.tags && p.tags.length ? ` [${p.tags.join(', ')}]` : ''}
+                  {p.flag ? '⚠️ ' : ''}{p.title}{p.tags && p.tags.length ? ` [${p.tags.join(', ')}]` : ''}
                   {b ? ` — ⏳ ${b}` : ''}
                 </button>
               )

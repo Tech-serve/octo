@@ -202,6 +202,10 @@ async function runTask(task) {
         logs: taskLog.getLines(),
       });
       taskLog.error(`Задача завершилась с ошибкой: ${err.message}`);
+      // checkpoint/бан аккаунта — помечаем фейк как требующий ручной проверки.
+      if (/checkpoint|проверк|заблокир|verif/i.test(err.message)) {
+        try { store.flagProfile(task.payload.profileUuid, 'checkpoint'); } catch { /* ignore */ }
+      }
     }
   } finally {
     store.update(task.id, { logs: taskLog.getLines() });
