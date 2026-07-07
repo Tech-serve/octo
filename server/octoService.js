@@ -136,22 +136,42 @@ async function detectAccountStatus(page) {
 
 async function connectToOcto(profileUuid, log) {
   log.info(`[Octo] Запуск профиля ${profileUuid}...`);
+
+  const startProfile = () => axios.post(`${OCTO_LOCAL_API}/start`, {
+    uuid: profileUuid,
+    headless: config.headless,
+    debug_port: true,
+  });
+  // Достаём реальную причину из тела ответа Octo (msg/error/message).
+  const octoDetail = (e) => {
+    const body = e.response && e.response.data;
+    if (body) return body.msg || body.error || body.message || (typeof body === 'string' ? body : JSON.stringify(body));
+    return e.message;
+  };
+
   let response;
   try {
-    response = await axios.post(`${OCTO_LOCAL_API}/start`, {
-      uuid: profileUuid,
-      headless: config.headless,
-      debug_port: true,
-    });
+    response = await startProfile();
   } catch (e) {
-    // Достаём реальную причину из тела ответа Octo (msg/error/message), а не
-    // просто «status code 400» — так видно, что именно не так (лимит/прокси/…).
-    const body = e.response && e.response.data;
-    let detail = e.message;
-    if (body) detail = body.msg || body.error || body.message || (typeof body === 'string' ? body : JSON.stringify(body));
-    const err = new Error(`Octo отказал в запуске: ${detail}`);
-    err.octoStatus = e.response && e.response.status;
-    throw err;
+    const detail = octoDetail(e);
+    // Профиль остался открытым от прошлого (прерванного) прогона — Octo не даёт
+    // стартовать уже запущенный. Гасим и стартуем заново.
+    if (/already started|уже запущ/i.test(detail)) {
+      log.info('[Octo] Профиль уже запущен — останавливаю и запускаю заново...');
+      try { await axios.post(`${OCTO_LOCAL_API}/stop`, { uuid: profileUuid }); } catch { /* ignore */ }
+      await new Promise((r) => setTimeout(r, 2000));
+      try {
+        response = await startProfile();
+      } catch (e2) {
+        const err = new Error(`Octo отказал в запуске (после рестарта): ${octoDetail(e2)}`);
+        err.octoStatus = e2.response && e2.response.status;
+        throw err;
+      }
+    } else {
+      const err = new Error(`Octo отказал в запуске: ${detail}`);
+      err.octoStatus = e.response && e.response.status;
+      throw err;
+    }
   }
 
   // Octo возвращает поле ws_endpoint (оставляем ws как запасной вариант для совместимости)
