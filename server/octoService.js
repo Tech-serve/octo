@@ -40,16 +40,33 @@ function extractTags(tags) {
 // (на случай если API называет поле иначе).
 function parseFbName(profile) {
   if (!profile || typeof profile !== 'object') return '';
-  const pick = (s) => {
-    if (typeof s !== 'string') return '';
-    const m = s.match(/\[([^\]]+)\]/);
-    return m ? m[1].trim() : '';
-  };
-  const direct = pick(profile.description) || pick(profile.notes) || pick(profile.note);
-  if (direct) return direct;
-  for (const v of Object.values(profile)) {
-    const got = pick(v);
-    if (got) return got;
+  const dec = (x) => { try { return decodeURIComponent(String(x).replace(/\+/g, ' ')); } catch { return String(x); } };
+  // «Похоже на имя»: буквы (в т.ч. кириллица), пробел, точка, дефис, апостроф.
+  const looksName = (s) => typeof s === 'string' && /^[\p{L}][\p{L}.\-'\s]{0,40}$/u.test(s.trim());
+
+  const strs = [];
+  for (const k of ['description', 'notes', 'note']) if (typeof profile[k] === 'string') strs.push(profile[k]);
+  for (const v of Object.values(profile)) if (typeof v === 'string') strs.push(v);
+
+  for (const s of strs) {
+    // 1) Имя в квадратных скобках: "... [Имя Фамилия] ..."
+    const br = s.match(/\[([^\]]+)\]/);
+    if (br) return br[1].trim();
+    // 2) Из URL генератора паспорта: "?name=Darya&surname=Kalinina"
+    const nm = s.match(/[?&]name=([^&|#\s]+)/i);
+    if (nm) {
+      const sn = s.match(/[?&]surname=([^&|#\s]+)/i);
+      const full = [dec(nm[1]), sn ? dec(sn[1]) : ''].map((x) => x.trim()).filter(Boolean).join(' ');
+      if (full) return full;
+    }
+    // 3) Пайп-формат: "...|почта|пароль|Имя|Фамилия|..." — имя идёт сразу после почты.
+    if (s.includes('|')) {
+      const parts = s.split('|');
+      const ei = parts.findIndex((x) => /@/.test(x));
+      if (ei >= 0 && looksName(parts[ei + 2]) && looksName(parts[ei + 3])) {
+        return `${parts[ei + 2].trim()} ${parts[ei + 3].trim()}`;
+      }
+    }
   }
   return '';
 }
