@@ -432,7 +432,9 @@ async function leaveFacebookComment(payload, log, handle = {}) {
     }
     return identity;
   } finally {
-    if (profileUuid) await disconnectOcto(profileUuid, log);
+    // Останавливаем только если МЫ его открыли (connection есть). Если старт
+    // упал с «already started» — в профиле работает человек, не трогаем.
+    if (connection && profileUuid) await disconnectOcto(profileUuid, log);
     // Картинку НЕ удаляем — она нужна для истории/просмотра (раздаётся статикой).
   }
 }

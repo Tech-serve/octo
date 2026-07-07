@@ -75,7 +75,7 @@ async function listProfiles() {
 // страницы: id — из куки c_user (надёжно), имя — из CurrentUserInitialData,
 // которую FB встраивает в inline-скрипты. Навигация не нужна — читаем с текущей
 // FB-страницы. Возвращает { fbId, fbName } (любое поле может быть пустым).
-async function readFbIdentity(page) {
+async function readFbIdentity(page, opts = {}) {
   const out = { fbId: '', fbName: '' };
   try {
     const cookies = await page.context().cookies('https://www.facebook.com');
@@ -100,6 +100,28 @@ async function readFbIdentity(page) {
       if (parsed.name) out.fbName = parsed.name;
     }
   } catch { /* скрипт не найден — имя останется пустым */ }
+
+  // Запасной способ (только для проверочного прогона): если имя не считалось —
+  // зайти на свой профиль и взять его из og:title/title. Медленнее (навигация),
+  // поэтому обычная простановка коммента это не вызывает.
+  if (opts.deep && !out.fbName) {
+    try {
+      await page.goto('https://www.facebook.com/me/', { waitUntil: 'domcontentloaded', timeout: config.navTimeout });
+      await page.waitForTimeout(1200);
+      const name = await page.evaluate(() => {
+        const og = document.querySelector('meta[property="og:title"]');
+        if (og && og.content) return og.content.trim();
+        const t = (document.title || '').replace(/\s*[|·—-]\s*Facebook.*$/i, '').replace(/^\(\d+\)\s*/, '').trim();
+        return t && !/^facebook$/i.test(t) ? t : '';
+      });
+      if (name) out.fbName = name;
+      if (!out.fbId) {
+        const cookies = await page.context().cookies('https://www.facebook.com');
+        const cu = cookies.find((c) => c.name === 'c_user');
+        if (cu && cu.value) out.fbId = cu.value;
+      }
+    } catch { /* профиль не открылся — имя останется пустым */ }
+  }
 
   return out;
 }
@@ -153,25 +175,11 @@ async function connectToOcto(profileUuid, log) {
   try {
     response = await startProfile();
   } catch (e) {
-    const detail = octoDetail(e);
-    // Профиль остался открытым от прошлого (прерванного) прогона — Octo не даёт
-    // стартовать уже запущенный. Гасим и стартуем заново.
-    if (/already started|уже запущ/i.test(detail)) {
-      log.info('[Octo] Профиль уже запущен — останавливаю и запускаю заново...');
-      try { await axios.post(`${OCTO_LOCAL_API}/stop`, { uuid: profileUuid }); } catch { /* ignore */ }
-      await new Promise((r) => setTimeout(r, 2000));
-      try {
-        response = await startProfile();
-      } catch (e2) {
-        const err = new Error(`Octo отказал в запуске (после рестарта): ${octoDetail(e2)}`);
-        err.octoStatus = e2.response && e2.response.status;
-        throw err;
-      }
-    } else {
-      const err = new Error(`Octo отказал в запуске: ${detail}`);
-      err.octoStatus = e.response && e.response.status;
-      throw err;
-    }
+    // НЕ трогаем уже запущенные профили — в них может работать человек. Просто
+    // сообщаем реальную причину отказа Octo и идём дальше.
+    const err = new Error(`Octo отказал в запуске: ${octoDetail(e)}`);
+    err.octoStatus = e.response && e.response.status;
+    throw err;
   }
 
   // Octo возвращает поле ws_endpoint (оставляем ws как запасной вариант для совместимости)

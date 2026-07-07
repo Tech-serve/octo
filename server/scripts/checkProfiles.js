@@ -11,6 +11,8 @@
 // Запуск (на сервере, из папки server):
 //   node scripts/checkProfiles.js                  — все непроверенные
 //   node scripts/checkProfiles.js --tag="Fakes | Sweeps"   — только с этим тегом
+//   node scripts/checkProfiles.js --recheck        — + переоткрыть ВСЕ помеченные
+//       (checkpoint/бан/прокси/разлогин) и переписать их актуальный статус
 //   node scripts/checkProfiles.js --all            — проверить ВСЕХ заново
 //   node scripts/checkProfiles.js --concurrency=10 — своё число параллельных
 
@@ -24,9 +26,12 @@ const {
 const FB_URL = 'https://www.facebook.com/';
 
 function parseArgs() {
-  const out = { tag: null, all: false, concurrency: config.maxConcurrent };
+  const out = {
+    tag: null, all: false, recheck: false, concurrency: config.maxConcurrent,
+  };
   for (const a of process.argv.slice(2)) {
     if (a === '--all') out.all = true;
+    else if (a === '--recheck') out.recheck = true;
     else if (a.startsWith('--tag=')) out.tag = a.slice(6).replace(/^["']|["']$/g, '');
     else if (a.startsWith('--concurrency=')) {
       const n = parseInt(a.slice(14), 10);
@@ -43,15 +48,19 @@ async function checkOne(uuid) {
     const { page } = conn;
     await page.goto(FB_URL, { waitUntil: 'domcontentloaded', timeout: config.navTimeout });
     await page.waitForTimeout(1500);
-    const ident = await readFbIdentity(page);
+    const ident = await readFbIdentity(page, { deep: true });
     if (ident.fbId || ident.fbName) store.upsertWhitelist(uuid, ident.fbId, ident.fbName);
     let acc = await detectAccountStatus(page);
     if (acc === 'ok' && !ident.fbId) acc = 'logout';
     if (acc === 'ok') store.clearProfileFlag(uuid); else store.flagProfile(uuid, acc);
     return { status: acc, name: ident.fbName, id: ident.fbId };
   } finally {
-    try { if (conn && conn.browser) await conn.browser.close().catch(() => {}); } catch { /* ignore */ }
-    try { await disconnectOcto(uuid, logger); } catch { /* ignore */ }
+    // Закрываем только СВОЮ сессию. Если старт упал («already started» —
+    // в профиле кто-то работает), conn нет — профиль не трогаем.
+    if (conn) {
+      try { if (conn.browser) await conn.browser.close().catch(() => {}); } catch { /* ignore */ }
+      try { await disconnectOcto(uuid, logger); } catch { /* ignore */ }
+    }
   }
 }
 
@@ -69,7 +78,8 @@ async function main() {
   const retryReasons = new Set(['error', 'proxy']);
   const needsCheck = (p) => {
     const flag = flags[p.uuid];
-    if (flag) return retryReasons.has(flag.reason);
+    // С --recheck переоткрываем ЛЮБОЙ помеченный (обновить/исправить статус).
+    if (flag) return args.recheck ? true : retryReasons.has(flag.reason);
     const w = wl[p.uuid];
     return !w || !w.fbName;
   };

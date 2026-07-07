@@ -39,7 +39,7 @@ async function captureOne(uuid) {
     await page.goto(FB_URL, { waitUntil: 'domcontentloaded', timeout: config.navTimeout });
     await page.waitForTimeout(1500); // дать FB отрисовать inline-данные
 
-    const ident = await readFbIdentity(page);
+    const ident = await readFbIdentity(page, { deep: true });
     if (ident.fbId || ident.fbName) store.upsertWhitelist(uuid, ident.fbId, ident.fbName);
 
     let acc = await detectAccountStatus(page);
@@ -51,8 +51,12 @@ async function captureOne(uuid) {
 
     return { status: acc };
   } finally {
-    try { if (connection && connection.browser) await connection.browser.close().catch(() => {}); } catch { /* ignore */ }
-    try { await disconnectOcto(uuid, logger); } catch { /* ignore */ }
+    // Закрываем только СВОЮ сессию. Если connectToOcto упал («already started» —
+    // в профиле кто-то работает), connection нет — профиль не трогаем.
+    if (connection) {
+      try { if (connection.browser) await connection.browser.close().catch(() => {}); } catch { /* ignore */ }
+      try { await disconnectOcto(uuid, logger); } catch { /* ignore */ }
+    }
   }
 }
 

@@ -466,7 +466,7 @@ function Operation({
           .filter((p) => !searchStr || (p.title || '').toLowerCase().includes(String(searchStr).toLowerCase()))
           .map((p) => {
             const b = profileBusy(p.uuid)
-            return <option key={p.uuid} value={p.uuid}>{p.flag ? '⚠️ ' : ''}{p.title}{p.fbName ? ` · ${p.fbName}` : ''}{b ? ` — ${b}` : ''}</option>
+            return <option key={p.uuid} value={p.uuid}>{p.flag ? `⚠️ ${flagLabel(p.flag.reason)} ` : ''}{p.title}{p.fbName ? ` · ${p.fbName}` : ''}{b ? ` — ${b}` : ''}</option>
           })}
       </select>
     </>
