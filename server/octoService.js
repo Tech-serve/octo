@@ -56,22 +56,14 @@ function parseFbName(profile) {
 
 // Получить ВСЕ профили из облачного API Octo, проходя по всем страницам.
 // Возвращает [{ uuid, title, tags: [] }]. Нужен API-токен.
-async function listProfiles() {
-  if (!config.octoApiToken) {
-    const err = new Error('Не задан OCTO_API_TOKEN — список профилей недоступен. Введите UUID вручную.');
-    err.code = 'NO_TOKEN';
-    throw err;
-  }
-
+async function fetchAllProfiles(fields) {
   const pageLen = 100;
   const maxPages = 500; // предохранитель (до 50 000 профилей)
   const headers = { 'X-Octo-Api-Token': config.octoApiToken };
   const all = [];
 
   for (let page = 0; page < maxPages; page++) {
-    // Без фильтра fields — Octo отдаёт полный профиль (включая описание/notes,
-    // как бы поле ни называлось). Фильтр с неизвестным полем Octo отвергает.
-    const url = `${config.octoCloudApi}/profiles?page_len=${pageLen}&page=${page}`;
+    const url = `${config.octoCloudApi}/profiles?page_len=${pageLen}&page=${page}&fields=${fields}`;
     // eslint-disable-next-line no-await-in-loop
     const response = await axios.get(url, { headers, timeout: 20000 });
 
@@ -93,6 +85,28 @@ async function listProfiles() {
   }
 
   return all;
+}
+
+async function listProfiles() {
+  if (!config.octoApiToken) {
+    const err = new Error('Не задан OCTO_API_TOKEN — список профилей недоступен. Введите UUID вручную.');
+    err.code = 'NO_TOKEN';
+    throw err;
+  }
+  // Всегда запрашиваем title,tags (теги гарантированно работают). Плюс пытаемся
+  // добрать поле описания — в разных версиях API оно зовётся по-разному, а
+  // неизвестное поле Octo отвергает целиком. Поэтому пробуем по очереди и
+  // откатываемся на безопасный набор — теги/список при этом не ломаются.
+  let lastErr;
+  for (const fields of ['title,tags,description', 'title,tags,notes', 'title,tags']) {
+    try {
+      // eslint-disable-next-line no-await-in-loop
+      return await fetchAllProfiles(fields);
+    } catch (e) {
+      lastErr = e;
+    }
+  }
+  throw lastErr;
 }
 
 async function connectToOcto(profileUuid, log) {
