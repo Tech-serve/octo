@@ -161,28 +161,51 @@ function ImagePicker({
 // Профили и таймеры занятости приходят сверху (общие для всех вкладок).
 // ─────────────────────────────────────────────────────────────────────────
 function Operation({
-  mode, profiles, loadingProfiles, profilesError, loadProfiles, busy, busyAt, now,
+  mode, opId, profiles, loadingProfiles, profilesError, loadProfiles, busy, busyAt, now,
 }) {
-  const [profileUuid, setProfileUuid] = useState('')
-  const [posts, setPosts] = useState([{ url: '', image: null, imageName: '' }])
-  const [commentText, setCommentText] = useState('')
-  const [tasks, setTasks] = useState([])
+  // Черновик операции (форма + результаты) сохраняется в браузере и переживает
+  // перезагрузку страницы. Ключ уникален на режим+операцию.
+  const storageKey = `octobot:op:${mode}:${opId}`
+  const [saved] = useState(() => {
+    try { return JSON.parse(localStorage.getItem(storageKey) || '{}') } catch { return {} }
+  })
+  const [profileUuid, setProfileUuid] = useState(saved.profileUuid || '')
+  const [posts, setPosts] = useState(saved.posts || [{ url: '', image: null, imageName: '' }])
+  const [commentText, setCommentText] = useState(saved.commentText || '')
+  const [tasks, setTasks] = useState(saved.tasks || [])
   const [error, setError] = useState('')
   const [submitting, setSubmitting] = useState(false)
   const [search, setSearch] = useState('')
   const [tagFilter, setTagFilter] = useState('')
   // Режим 2: один пост -> много фейков (каждый со своим тегом/фейком/комментом/картинкой).
-  const [post2, setPost2] = useState('')
-  const [entries, setEntries] = useState([{
+  const [post2, setPost2] = useState(saved.post2 || '')
+  const [entries, setEntries] = useState(saved.entries || [{
     profileUuid: '', tag: '', search: '', comment: '', image: null, imageName: '',
   }])
   // Режим 3: диалоги. dialogs[].steps[] = { profileUuid, tag, text, replyTo, image }.
-  const [post3, setPost3] = useState('')
+  const [post3, setPost3] = useState(saved.post3 || '')
   const newStep = (replyTo = null) => ({
     profileUuid: '', tag: '', search: '', text: '', replyTo, image: null, imageName: '',
   })
-  const [dialogs, setDialogs] = useState([{ steps: [newStep(null)] }])
+  const [dialogs, setDialogs] = useState(saved.dialogs || [{ steps: [newStep(null)] }])
   const pollRef = useRef(null)
+
+  // Сохраняем черновик при любом изменении. Если картинки не влезают в квоту —
+  // сохраняем без base64 (текст/фейки/результаты остаются).
+  useEffect(() => {
+    const data = { profileUuid, posts, commentText, tasks, post2, entries, post3, dialogs }
+    try {
+      localStorage.setItem(storageKey, JSON.stringify(data))
+    } catch {
+      try {
+        const noImg = (arr) => arr.map((x) => ({ ...x, image: null }))
+        const noImgSteps = (ds) => ds.map((d) => ({ steps: d.steps.map((s) => ({ ...s, image: null })) }))
+        localStorage.setItem(storageKey, JSON.stringify({
+          ...data, posts: noImg(posts), entries: noImg(entries), dialogs: noImgSteps(dialogs),
+        }))
+      } catch { /* совсем не влезло — пропустим */ }
+    }
+  }, [storageKey, profileUuid, posts, commentText, tasks, post2, entries, post3, dialogs])
 
   // Метка занятости профиля: «занят до 14:32» (уже идёт) или «занят с 15:10».
   const profileBusy = (uuid) => {
@@ -971,6 +994,7 @@ function App() {
             <div key={t.id} style={{ display: activeId[m] === t.id ? 'block' : 'none' }}>
               <Operation
                 mode={m}
+                opId={t.id}
                 profiles={profiles}
                 loadingProfiles={loadingProfiles}
                 profilesError={profilesError}
