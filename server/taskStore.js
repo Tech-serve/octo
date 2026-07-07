@@ -16,6 +16,9 @@ const STATUS = {
 // Локальная БД (node:sqlite). Файл переживает рестарт сервера.
 fs.mkdirSync(path.dirname(config.dbPath), { recursive: true });
 const db = new DatabaseSync(config.dbPath);
+// Ждать до 5с при блокировке файла — на случай, когда разовый скрипт проверки
+// профилей пишет в ту же БД, что и запущенный сервер.
+db.exec('PRAGMA busy_timeout = 5000;');
 db.exec(`
   CREATE TABLE IF NOT EXISTS tasks (
     id           TEXT PRIMARY KEY,
