@@ -467,21 +467,6 @@ function Operation({
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: '15px' }}>
-      {flagged.length > 0 && (
-        <div className="tm-card" style={{ border: '1px solid var(--danger)', display: 'flex', flexDirection: 'column', gap: '6px' }}>
-          <div className="tm-warn" style={{ fontSize: '13px' }}>
-            ⚠️ Требуют проверки (checkpoint). Зайди в Octo под фейком, пройди подтверждение, затем нажми «проверено»:
-          </div>
-          {flagged.map((p) => (
-            <div key={p.uuid} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '10px' }}>
-              <span style={{ fontSize: '13px' }}>{p.title}</span>
-              <button type="button" className="tm-btn tm-btn-outline" style={{ padding: '4px 10px', fontSize: '12px', flex: '0 0 auto' }} onClick={() => clearFlag(p.uuid)}>
-                ✓ проверено
-              </button>
-            </div>
-          ))}
-        </div>
-      )}
       {mode === 1 && (
       <>
       {loadingProfiles ? (
@@ -507,23 +492,45 @@ function Operation({
             </button>
           </div>
 
+          {flagged.length > 0 && (
+            <div className="tm-warn" style={{ fontSize: '12px' }}>
+              ⚠️ Требуют проверки (checkpoint): пройди подтверждение в Octo под фейком и нажми «проверено».
+            </div>
+          )}
           <div className="tm-list" role="listbox">
             {filteredProfiles.length === 0 && <div className="tm-list-empty">— Ничего не найдено —</div>}
             {filteredProfiles.map((p) => {
               const b = profileBusy(p.uuid)
               const sel = p.uuid === profileUuid
               return (
-                <button
+                <div
                   key={p.uuid}
-                  type="button"
-                  role="option"
-                  aria-selected={sel}
                   className={`tm-list-item${sel ? ' active' : ''}`}
-                  onClick={() => setProfileUuid(p.uuid)}
+                  style={{ display: 'flex', alignItems: 'center', gap: '8px' }}
                 >
-                  {p.flag ? '⚠️ ' : ''}{p.title}{p.tags && p.tags.length ? ` [${p.tags.join(', ')}]` : ''}
-                  {b ? ` — ⏳ ${b}` : ''}
-                </button>
+                  <span
+                    role="option"
+                    aria-selected={sel}
+                    tabIndex={0}
+                    onClick={() => setProfileUuid(p.uuid)}
+                    onKeyDown={(e) => { if (e.key === 'Enter') setProfileUuid(p.uuid) }}
+                    style={{ flex: 1, cursor: 'pointer', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}
+                  >
+                    {p.flag ? '⚠️ ' : ''}{p.title}{p.tags && p.tags.length ? ` [${p.tags.join(', ')}]` : ''}
+                    {b ? ` — ⏳ ${b}` : ''}
+                  </span>
+                  {p.flag && (
+                    <button
+                      type="button"
+                      className="tm-btn tm-btn-outline"
+                      style={{ padding: '2px 8px', fontSize: '11px', flex: '0 0 auto' }}
+                      title="Требует проверки в Octo (checkpoint). Пройди подтверждение под фейком и нажми «проверено»."
+                      onClick={(e) => { e.stopPropagation(); clearFlag(p.uuid) }}
+                    >
+                      ✓ проверено
+                    </button>
+                  )}
+                </div>
               )
             })}
           </div>
