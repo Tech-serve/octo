@@ -313,6 +313,8 @@ function Operation({
         profileUuid: t.profileUuid,
         scheduledAt: t.scheduledAt,
         delayed: !!t.delayed,
+        commentText: t.commentText,
+        imageUrl: t.imageUrl,
       })))
     } catch (e) {
       setError(`Ошибка: ${e.response?.data?.error || e.message}`)
@@ -346,6 +348,8 @@ function Operation({
         profileUuid: t.profileUuid,
         scheduledAt: t.scheduledAt,
         delayed: !!t.delayed,
+        commentText: t.commentText,
+        imageUrl: t.imageUrl,
       })))
     } catch (e) {
       setError(`Ошибка: ${e.response?.data?.error || e.message}`)
@@ -383,6 +387,8 @@ function Operation({
         profileUuid: t.profileUuid,
         scheduledAt: t.scheduledAt,
         delayed: !!t.delayed,
+        commentText: t.commentText,
+        imageUrl: t.imageUrl,
       })))
     } catch (e) {
       setError(`Ошибка: ${e.response?.data?.error || e.message}`)
@@ -670,15 +676,23 @@ function Operation({
 
       {/* Короткий итог по каждому посту — без логов */}
       {tasks.map((task) => (
-        <div key={task.id} className="tm-card" style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '10px' }}>
-            <a className="tm-link" href={task.postUrl} target="_blank" rel="noreferrer" style={{ fontSize: '12px' }}>{task.postUrl}</a>
-            <span style={{ fontWeight: 'bold', color: STATUS_COLORS[task.status] || 'var(--fg)', flex: '0 0 auto' }}>
-              {taskStatusText(task)}
-            </span>
+        <div key={task.id} className="tm-card" style={{ display: 'flex', gap: '10px' }}>
+          {task.imageUrl ? (
+            <img src={`${API_BASE}${task.imageUrl}`} alt="" style={{ width: 48, height: 48, objectFit: 'cover', borderRadius: 8, flex: '0 0 auto' }} />
+          ) : (
+            <div style={{ width: 48, height: 48, flex: '0 0 auto' }} />
+          )}
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '4px', minWidth: 0, flex: 1 }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '10px' }}>
+              <a className="tm-link" href={task.postUrl} target="_blank" rel="noreferrer" style={{ fontSize: '12px' }}>{task.postUrl}</a>
+              <span style={{ fontWeight: 'bold', color: STATUS_COLORS[task.status] || 'var(--fg)', flex: '0 0 auto' }}>
+                {taskStatusText(task)}
+              </span>
+            </div>
+            {task.profileUuid && <span className="tm-muted" style={{ fontSize: '11px' }}>Фейк: {profileTitle(task.profileUuid)}</span>}
+            {task.commentText && <div style={{ fontSize: '13px' }}>{task.commentText}</div>}
+            {task.status === 'error' && task.error && <span className="tm-danger-text" style={{ fontSize: '12px' }}>{task.error}</span>}
           </div>
-          {task.profileUuid && <span className="tm-muted" style={{ fontSize: '11px' }}>Фейк: {profileTitle(task.profileUuid)}</span>}
-          {task.status === 'error' && task.error && <span className="tm-danger-text" style={{ fontSize: '12px' }}>{task.error}</span>}
         </div>
       ))}
 

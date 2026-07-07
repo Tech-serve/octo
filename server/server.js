@@ -166,6 +166,8 @@ app.post('/api/tasks', ownerMiddleware, (req, res) => {
           delayed: scheduledAt > reqNow + 1000,
           stepOrder: idx + 1,
           dialogId,
+          commentText: s.text,
+          imageUrl: imagePath ? `/uploads/${path.basename(imagePath)}` : null,
         });
       });
     });
@@ -240,6 +242,8 @@ app.post('/api/tasks', ownerMiddleware, (req, res) => {
         scheduledAt,
         delayed: scheduledAt > reqNow + 1000,
         hasImage: !!imagePath,
+        commentText: e.comment,
+        imageUrl: imagePath ? `/uploads/${path.basename(imagePath)}` : null,
       };
     });
     logger.info(`Режим 2: создано задач ${created.length} на пост ${url}`, 'api');
@@ -322,6 +326,8 @@ app.post('/api/tasks', ownerMiddleware, (req, res) => {
       scheduledAt,
       delayed: scheduledAt > reqNow + 1000,
       hasImage: !!imagePath,
+      commentText: variants[idx],
+      imageUrl: imagePath ? `/uploads/${path.basename(imagePath)}` : null,
     };
   });
   logger.info(`Создано задач: ${created.length} (профиль ${profileUuid})`, 'api');
