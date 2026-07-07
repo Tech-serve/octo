@@ -2,8 +2,8 @@
 //
 // Что делает:
 //   • берёт все профили из Octo;
-//   • отбирает «непроверенные» — те, кого ещё нет в whitelist и без пометки
-//     (профили со статусом «ошибка» перепроверяет);
+//   • отбирает: кого НЕТ в whitelist (нет имени) ИЛИ со статусом «ошибка»
+//     (последние перепроверяет);
 //   • открывает каждый, читает из FB имя+ID (пишет в whitelist) и статус
 //     аккаунта: жив / checkpoint / бан / разлогин / ошибка (ставит пометку ⚠️);
 //   • печатает итоговый список по категориям.
@@ -61,14 +61,16 @@ async function main() {
   const wl = store.listWhitelist();
   const flags = store.listFlags();
 
-  // «Проверен» = есть в whitelist ИЛИ помечен НЕ ошибкой (ошибку перепроверяем).
-  const isChecked = (p) => wl[p.uuid] || (flags[p.uuid] && flags[p.uuid].reason !== 'error');
+  // Берём: кого НЕТ в whitelist (нет имени) ИЛИ статус «ошибка» (перепроверяем).
+  const needsCheck = (p) => !wl[p.uuid] || (flags[p.uuid] && flags[p.uuid].reason === 'error');
 
   let todo = all;
-  if (!args.all) todo = todo.filter((p) => !isChecked(p));
+  if (!args.all) todo = todo.filter(needsCheck);
   if (args.tag) todo = todo.filter((p) => (p.tags || []).includes(args.tag));
 
-  console.log(`Всего профилей: ${all.length}. Уже проверено: ${all.length - all.filter((p) => !isChecked(p)).length}. К проверке сейчас: ${todo.length}`);
+  const noName = all.filter((p) => !wl[p.uuid]).length;
+  const errCount = all.filter((p) => flags[p.uuid] && flags[p.uuid].reason === 'error').length;
+  console.log(`Всего профилей: ${all.length}. Без имени (нет в whitelist): ${noName}, со статусом «ошибка»: ${errCount}. К проверке: ${todo.length}`);
   if (args.tag) console.log(`Фильтр по тегу: "${args.tag}"`);
   if (!todo.length) { console.log('Нечего проверять.'); process.exit(0); }
 
