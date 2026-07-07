@@ -78,7 +78,9 @@ function rebuild(uuids, opts = {}) {
     running: true, canceled: false, total: list.length, done: 0, ok: 0, failed: 0,
     current: '', startedAt: new Date().toISOString(), finishedAt: null, lastError: '',
   });
-  const concurrency = Math.max(1, Math.min(opts.concurrency || 3, 8));
+  // По умолчанию — как основная очередь (MAX_CONCURRENT). Сбор легче коммента,
+  // так что тянем столько же параллельно. Выше лимита машины не поднимаем.
+  const concurrency = Math.max(1, Math.min(opts.concurrency || config.maxConcurrent, config.maxConcurrent));
   logger.info(`[whitelist] Старт пересбора: ${list.length} профилей, параллельно ${concurrency}`, 'whitelist');
 
   runPool(list, concurrency)
