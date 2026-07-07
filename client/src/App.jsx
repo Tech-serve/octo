@@ -411,17 +411,26 @@ function Operation({
 
     setSubmitting(true)
     try {
-      // Одна исходная картинка операции → на каждый пост свой уникальный вариант.
-      const items = await Promise.all(rawItems.map(async (it) => ({
-        url: it.url,
-        image: opImage ? await varyImage(opImage) : null,
-      })))
-      const { data } = await axios.post(`${API_BASE}/api/tasks`, {
-        profileUuid,
-        posts: items,
-        commentText,
-      })
-      setTasks((data.tasks || []).map((t) => ({
+      let collected = []
+      if (opImage) {
+        // С картинкой шлём ПО ОДНОМУ посту за запрос: N вариаций base64 в одном
+        // теле рвут туннель Cloudflare (502). Каждый пост — свой уникальный вариант.
+        for (const it of rawItems) {
+          const image = await varyImage(opImage)
+          const { data } = await axios.post(`${API_BASE}/api/tasks`, {
+            profileUuid, posts: [{ url: it.url, image }], commentText,
+          })
+          collected = collected.concat(data.tasks || [])
+        }
+      } else {
+        const { data } = await axios.post(`${API_BASE}/api/tasks`, {
+          profileUuid,
+          posts: rawItems.map((it) => ({ url: it.url, image: null })),
+          commentText,
+        })
+        collected = data.tasks || []
+      }
+      setTasks(collected.map((t) => ({
         id: t.taskId,
         status: t.status,
         postUrl: t.postUrl,
