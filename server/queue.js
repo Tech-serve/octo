@@ -208,9 +208,12 @@ async function runTask(task) {
         logs: taskLog.getLines(),
       });
       taskLog.error(`Задача завершилась с ошибкой: ${err.message}`);
-      // checkpoint/бан аккаунта — помечаем фейк как требующий ручной проверки.
-      if (/checkpoint|проверк|заблокир|verif/i.test(err.message)) {
-        try { store.flagProfile(task.payload.profileUuid, 'checkpoint'); } catch { /* ignore */ }
+      // Помечаем фейк с ТОЧНЫМ статусом: если воркер определил (бан/проверка/…) —
+      // берём его, иначе по тексту ошибки считаем checkpoint.
+      const st = err.accountStatus
+        || (/checkpoint|проверк|заблокир|verif/i.test(err.message) ? 'checkpoint' : null);
+      if (st) {
+        try { store.flagProfile(task.payload.profileUuid, st); } catch { /* ignore */ }
       }
     }
   } finally {

@@ -1,5 +1,7 @@
 const fs = require('fs');
-const { connectToOcto, disconnectOcto, readFbIdentity } = require('./octoService');
+const {
+  connectToOcto, disconnectOcto, readFbIdentity, detectAccountStatus,
+} = require('./octoService');
 const config = require('./config');
 const {
   sleep, rand, randInt,
@@ -358,6 +360,15 @@ async function leaveFacebookComment(payload, log, handle = {}) {
       if (!commentBox) {
         block = await detectBlock(page);
         if (block) throw new Error(`Действие прервано: ${block}.`);
+        // Поле не найдено и detectBlock ничего не увидел — проверим статус
+        // аккаунта. Бан/проверка → помечаем профиль (e.accountStatus подхватит
+        // очередь). Если аккаунт живой — комменты на посте отключены, профиль ок.
+        const st = await detectAccountStatus(page);
+        if (st !== 'ok') {
+          const e = new Error(`Аккаунт требует внимания (${st}) — поле комментария недоступно.`);
+          e.accountStatus = st;
+          throw e;
+        }
         throw new Error('Поле для комментария не найдено (возможно, изменилась вёрстка FB или комментарии отключены)');
       }
     }

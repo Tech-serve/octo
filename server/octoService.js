@@ -131,26 +131,84 @@ async function readFbIdentity(page, opts = {}) {
 // (язык-независимо), плюс запасные признаки: капча и текст «аккаунт отключён».
 async function detectAccountStatus(page) {
   const url = page.url();
+  let body = '';
+  try {
+    body = (await page.evaluate(() => ((document.body && document.body.innerText) || '').slice(0, 6000))).toLowerCase();
+  } catch { /* тело недоступно */ }
+  const has = (arr) => arr.some((p) => body.includes(p));
+
+  // 1) Бан/приостановка. Сильнее checkpoint: FB иногда показывает это тоже под
+  //    /checkpoint, поэтому решаем по тексту. Страница на языке аккаунта —
+  //    держим фразы по основным гео (ru/uk/en/es/pt/de/fr/it/pl/nl/tr).
+  const banPhrases = [
+    // ru/uk
+    'приостановили ваш аккаунт', 'мы приостановили', 'аккаунт приостановлен',
+    'обжаловать наше решение', 'будет отключ', 'ваш аккаунт отключ', 'ваш аккаунт заблокирован',
+    'ми призупинили', 'обліковий запис вимкнено', 'ваш акаунт вимкнено', 'оскаржити',
+    // en
+    'we suspended your account', 'your account has been suspended', 'account has been suspended',
+    'account has been disabled', 'your account is disabled', 'we disabled your account',
+    'we\'ve suspended your account', 'to disagree with the decision', 'disagree with our decision',
+    // es
+    'suspendimos tu cuenta', 'tu cuenta ha sido suspendida', 'hemos inhabilitado tu cuenta',
+    'tu cuenta ha sido inhabilitada', 'apelar',
+    // pt
+    'suspendemos sua conta', 'sua conta foi suspensa', 'desativamos sua conta',
+    'sua conta foi desativada', 'recorrer',
+    // de
+    'wir haben dein konto gesperrt', 'dein konto wurde gesperrt', 'dein konto wurde deaktiviert',
+    'einspruch',
+    // fr
+    'nous avons suspendu votre compte', 'votre compte a été suspendu', 'votre compte a été désactivé',
+    'faire appel',
+    // it
+    'abbiamo sospeso il tuo account', 'il tuo account è stato sospeso', 'il tuo account è stato disabilitato',
+    'presentare ricorso',
+    // pl
+    'zawiesiliśmy twoje konto', 'twoje konto zostało wyłączone', 'odwołać',
+    // nl
+    'we hebben je account opgeschort', 'je account is uitgeschakeld', 'bezwaar maken',
+    // tr
+    'hesabını askıya aldık', 'hesabın devre dışı bırakıldı', 'itiraz et',
+    // best-effort для не-латиницы (jp/kr/ar/he) — конкретные строки, без ложных срабатываний
+    'アカウントを停止', 'アカウントを無効', '계정이 정지', '계정이 비활성화',
+    'تم تعطيل حسابك', 'تم تعليق حسابك', 'החשבון שלך הושבת', 'השבתנו את החשבון',
+  ];
+  if (/\/disabled(\/|\b)/i.test(url) || has(banPhrases)) return 'disabled';
+
+  // 2) Верификация/подтверждение личности → checkpoint. URL /checkpoint —
+  //    язык-независимый признак, ловит любую верификацию (в т.ч. видеоселфи).
+  //    Тексты — вспомогательно, на случай верификации вне /checkpoint.
+  const verifyPhrases = [
+    // ru/uk
+    'подтвердите личность', 'подтвердите свою личность', 'видеоселфи', 'видеоселфі',
+    'подтвердите, что это ваш аккаунт', 'подтвердите, что это вы', 'підтвердьте',
+    // en
+    'confirm your identity', 'verify your identity', 'video selfie', 'security check',
+    'confirm it\'s you', 'we need to confirm',
+    // es/pt
+    'confirma tu identidad', 'verifica tu identidad', 'confirme sua identidade', 'verifique sua identidade',
+    'selfie de vídeo', 'selfie de video',
+    // de/fr/it
+    'bestätige deine identität', 'identität bestätigen', 'confirmez votre identité', 'vérifiez votre identité',
+    'conferma la tua identità', 'verifica la tua identità', 'video-selfie', 'selfie vidéo',
+    // pl/nl/tr
+    'potwierdź swoją tożsamość', 'zweryfikuj', 'bevestig je identiteit', 'kimliğini doğrula',
+  ];
   if (/\/checkpoint\//i.test(url)) return 'checkpoint';
   if (/two_step_verification|\/recover\/|\/confirmemail/i.test(url)) return 'checkpoint';
-  if (/\/disabled(\/|\b)/i.test(url)) return 'disabled';
+  if (has(verifyPhrases)) return 'checkpoint';
+
+  // 3) Разлогин.
   if (/\/login/i.test(url)) return 'logout';
 
+  // 4) Капча.
   try {
     const captcha = await page.$(
       'iframe[src*="captcha" i], iframe[src*="recaptcha" i], iframe[src*="hcaptcha" i], '
       + 'iframe[title*="captcha" i], div[id*="captcha" i], img[src*="captcha" i]',
     );
     if (captcha) return 'checkpoint';
-  } catch { /* ignore */ }
-
-  try {
-    const body = (await page.evaluate(() => ((document.body && document.body.innerText) || '').slice(0, 4000))).toLowerCase();
-    const disabledPhrases = [
-      'account has been disabled', 'your account has been disabled', 'account is disabled',
-      'ваш аккаунт отключ', 'ваш акаунт вимкнено', 'обліковий запис вимкнено',
-    ];
-    if (disabledPhrases.some((p) => body.includes(p))) return 'disabled';
   } catch { /* ignore */ }
 
   return 'ok';

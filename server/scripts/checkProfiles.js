@@ -100,8 +100,9 @@ async function main() {
   //  octo     — Octo отказал в запуске (лимит/занят/перенесён — текст в скобках);
   //  error    — прочее.
   const classify = (msg) => {
-    if (/SOCKS|PROXY|ERR_PROXY|ERR_SOCKS|ERR_TUNNEL/i.test(msg)) return 'proxy';
-    if (/connectOverCDP|Timeout \d+ms|has been closed|newPage/i.test(msg)) return 'overload';
+    if (/SOCKS|PROXY|ERR_PROXY|ERR_SOCKS|ERR_TUNNEL|proxy data/i.test(msg)) return 'proxy';
+    if (/connectOverCDP|Timeout \d+ms|has been closed|newPage|canceled by timeout|socket hang up|ECONNRESET/i.test(msg)) return 'overload';
+    if (/already started/i.test(msg)) return 'inuse';
     if (/Octo отказал|status code|ws_endpoint/i.test(msg)) return 'octo';
     return 'error';
   };
@@ -109,7 +110,7 @@ async function main() {
   const concurrency = Math.max(1, args.concurrency);
   const results = {
     ok: [], checkpoint: [], disabled: [], logout: [],
-    proxy: [], overload: [], octo: [], error: [],
+    proxy: [], overload: [], octo: [], inuse: [], error: [],
   };
   let idx = 0;
   let done = 0;
@@ -124,8 +125,9 @@ async function main() {
         (results[r.status] || results.error).push({ title: p.title, name: r.name });
       } catch (e) {
         const kind = classify(e.message || '');
-        // Прокси метим отдельным статусом, остальные технические — как «ошибка».
-        try { store.flagProfile(p.uuid, kind === 'proxy' ? 'proxy' : 'error'); } catch { /* ignore */ }
+        // Прокси — свой статус; технические — «ошибка»; «в работе» не метим вовсе.
+        const reason = kind === 'proxy' ? 'proxy' : (kind === 'inuse' ? null : 'error');
+        if (reason) { try { store.flagProfile(p.uuid, reason); } catch { /* ignore */ } }
         results[kind].push({ title: p.title, error: (e.message || '').replace(/\s+/g, ' ').slice(0, 120) });
       } finally {
         done += 1;
@@ -139,17 +141,18 @@ async function main() {
   await Promise.all(workers);
 
   const labels = {
-    checkpoint: 'CHECKPOINT / требуют проверки',
-    disabled: 'БАН (аккаунт отключён)',
+    checkpoint: 'CHECKPOINT / требуют проверки (верификация)',
+    disabled: 'БАН / приостановлен (обжалование)',
     logout: 'РАЗЛОГИН (сессия слетела)',
     proxy: 'ПРОКСИ мёртвый/недоступен (чинить прокси)',
-    overload: 'ПЕРЕГРУЗ / CDP (перепроверить, снизь --concurrency)',
+    overload: 'ПЕРЕГРУЗ при старте (перепроверить, снизь --concurrency)',
     octo: 'OCTO ОТКАЗАЛ В ЗАПУСКЕ (см. причину)',
+    inuse: 'В РАБОТЕ (профиль открыт кем-то — пропущен)',
     error: 'ПРОЧЕЕ (перепроверить)',
   };
   console.log('\n\n===== ИТОГ =====');
   console.log(`Живых: ${results.ok.length}`);
-  for (const key of ['checkpoint', 'disabled', 'logout', 'proxy', 'overload', 'octo', 'error']) {
+  for (const key of ['checkpoint', 'disabled', 'logout', 'proxy', 'overload', 'octo', 'inuse', 'error']) {
     const list = results[key];
     if (!list.length) continue;
     console.log(`\n${labels[key]}: ${list.length}`);
