@@ -186,12 +186,15 @@ function Operation({
   })
   const [profileUuid, setProfileUuid] = useState(saved.profileUuid || '')
   const [posts, setPosts] = useState(saved.posts || [{ url: '', image: null, imageName: '' }])
+  // Режим 1: одна картинка на всю операцию (её вешаем на КАЖДЫЙ пост, делая из
+  // неё уникальный вариант). Не привязана к конкретной ссылке.
+  const [opImage, setOpImage] = useState(saved.opImage || null)
+  const [opImageName, setOpImageName] = useState(saved.opImageName || '')
   const [commentText, setCommentText] = useState(saved.commentText || '')
   const [tasks, setTasks] = useState(saved.tasks || [])
   const [error, setError] = useState('')
   const [submitting, setSubmitting] = useState(false)
   const [search, setSearch] = useState('')
-  const [tagFilter, setTagFilter] = useState('')
   // Режим 2: один пост -> много фейков (каждый со своим тегом/фейком/комментом/картинкой).
   const [post2, setPost2] = useState(saved.post2 || '')
   const [entries, setEntries] = useState(saved.entries || [{
@@ -208,7 +211,9 @@ function Operation({
   // Сохраняем черновик при любом изменении. Если картинки не влезают в квоту —
   // сохраняем без base64 (текст/фейки/результаты остаются).
   useEffect(() => {
-    const data = { profileUuid, posts, commentText, tasks, post2, entries, post3, dialogs }
+    const data = {
+      profileUuid, posts, commentText, tasks, post2, entries, post3, dialogs, opImage, opImageName,
+    }
     try {
       localStorage.setItem(storageKey, JSON.stringify(data))
     } catch {
@@ -216,11 +221,11 @@ function Operation({
         const noImg = (arr) => arr.map((x) => ({ ...x, image: null }))
         const noImgSteps = (ds) => ds.map((d) => ({ steps: d.steps.map((s) => ({ ...s, image: null })) }))
         localStorage.setItem(storageKey, JSON.stringify({
-          ...data, posts: noImg(posts), entries: noImg(entries), dialogs: noImgSteps(dialogs),
+          ...data, posts: noImg(posts), entries: noImg(entries), dialogs: noImgSteps(dialogs), opImage: null,
         }))
       } catch { /* совсем не влезло — пропустим */ }
     }
-  }, [storageKey, profileUuid, posts, commentText, tasks, post2, entries, post3, dialogs])
+  }, [storageKey, profileUuid, posts, commentText, tasks, post2, entries, post3, dialogs, opImage, opImageName])
 
   // Метка занятости профиля: «занят до 14:32» (уже идёт) или «занят с 15:10».
   const profileBusy = (uuid) => {
@@ -233,11 +238,9 @@ function Operation({
     return `занят до ${fmtClock(busyAt + info.freeInMs)}`
   }
 
-  const allTags = Array.from(new Set(profiles.flatMap((p) => p.tags || []))).sort()
+  // Список зафиксирован на фейках (теги Fakes/Sweeps) — выбор тега убран из UI.
   const baseProfiles = profiles.filter((p) => (p.tags || []).some(isAllowedTag))
-  const source = tagFilter
-    ? profiles.filter((p) => (p.tags || []).includes(tagFilter))
-    : baseProfiles
+  const source = baseProfiles
   const filteredProfiles = source.filter(
     (p) => !search || (p.title || '').toLowerCase().includes(search.toLowerCase()),
   )
@@ -265,13 +268,12 @@ function Operation({
   const addPost = () => setPosts((p) => (p.length >= MAX_POSTS ? p : [...p, { url: '', image: null, imageName: '' }]))
   const removePost = (i) => setPosts((p) => (p.length === 1 ? p : p.filter((_, idx) => idx !== i)))
 
-  const pickImage = (i, file) => {
+  const pickOpImage = (file) => {
     if (!file) return
     const reader = new FileReader()
-    reader.onload = () => patchPost(i, { image: reader.result, imageName: file.name })
+    reader.onload = () => { setOpImage(reader.result); setOpImageName(file.name) }
     reader.readAsDataURL(file)
   }
-  const applyImageToAll = (src, name) => setPosts((p) => p.map((x) => ({ ...x, image: src, imageName: name })))
 
   // Название фейка по uuid (для короткого итога).
   const profileTitle = (uuid) => {
@@ -401,7 +403,7 @@ function Operation({
     if (mode === 2) { await startMode2(); return }
     setError('')
     const rawItems = posts
-      .map((p) => ({ url: (p.url || '').trim(), image: p.image || null }))
+      .map((p) => ({ url: (p.url || '').trim() }))
       .filter((p) => p.url)
     if (!profileUuid) { setError('Выберите профиль'); return }
     if (rawItems.length === 0) { setError('Добавьте хотя бы одну ссылку на пост'); return }
@@ -409,9 +411,10 @@ function Operation({
 
     setSubmitting(true)
     try {
+      // Одна исходная картинка операции → на каждый пост свой уникальный вариант.
       const items = await Promise.all(rawItems.map(async (it) => ({
         url: it.url,
-        image: it.image ? await varyImage(it.image) : null,
+        image: opImage ? await varyImage(opImage) : null,
       })))
       const { data } = await axios.post(`${API_BASE}/api/tasks`, {
         profileUuid,
@@ -454,12 +457,6 @@ function Operation({
   // Селект «тег + фейк» с фильтром по строке поиска (общий для режимов 2/3).
   const fakeSelect = (value, tag, searchStr, onTag, onFake) => (
     <>
-      {allTags.length > 0 && (
-        <select value={tag} onChange={onTag} title="Тег" style={{ flex: '0 0 auto', maxWidth: '140px', padding: '8px' }}>
-          <option value="">Fakes | Sweeps</option>
-          {allTags.map((t) => <option key={t} value={t}>{t}</option>)}
-        </select>
-      )}
       <select value={value} onChange={onFake} style={{ flex: 1, padding: '8px' }}>
         <option value="">— выберите фейк —</option>
         {entryProfiles(tag)
@@ -500,12 +497,6 @@ function Operation({
               onChange={(e) => setSearch(e.target.value)}
               style={{ flex: 1 }}
             />
-            {allTags.length > 0 && (
-              <select value={tagFilter} onChange={(e) => setTagFilter(e.target.value)} style={{ flex: '0 0 auto' }}>
-                <option value="">Fakes | Sweeps</option>
-                {allTags.map((t) => <option key={t} value={t}>{t}</option>)}
-              </select>
-            )}
             <button type="button" className="tm-icon-btn" onClick={loadProfiles} title="Обновить список профилей" style={{ width: '42px', flex: '0 0 auto' }}>
               <RefreshIcon />
             </button>
@@ -583,17 +574,6 @@ function Operation({
               onChange={(e) => patchPost(i, { url: e.target.value })}
               style={{ flex: 1 }}
             />
-            <ImagePicker
-              image={post.image}
-              imageName={post.imageName}
-              onPick={(f) => pickImage(i, f)}
-              onClear={() => patchPost(i, { image: null, imageName: '' })}
-            />
-            {post.image && posts.length > 1 && (
-              <button type="button" className="tm-btn" onClick={() => applyImageToAll(post.image, post.imageName)} title="Поставить эту картинку на все посты" style={{ flex: '0 0 auto', fontSize: '11px', padding: '4px 8px' }}>
-                ко всем
-              </button>
-            )}
             {posts.length > 1 && (
               <button type="button" className="tm-btn tm-btn-danger" onClick={() => removePost(i)} title="Удалить строку" style={{ width: '38px', height: '44px', flex: '0 0 auto', fontSize: '18px', padding: 0 }}>×</button>
             )}
@@ -601,12 +581,20 @@ function Operation({
         ))}
       </div>
 
-      <textarea
-        placeholder="Текст комментария"
-        value={commentText}
-        onChange={(e) => setCommentText(e.target.value)}
-        style={{ height: '100px' }}
-      />
+      <div style={{ display: 'flex', gap: '6px', alignItems: 'flex-start' }}>
+        <ImagePicker
+          image={opImage}
+          imageName={opImageName}
+          onPick={pickOpImage}
+          onClear={() => { setOpImage(null); setOpImageName('') }}
+        />
+        <textarea
+          placeholder="Текст комментария (картинка слева — одна на все посты)"
+          value={commentText}
+          onChange={(e) => setCommentText(e.target.value)}
+          style={{ height: '100px', flex: 1 }}
+        />
+      </div>
       </>
       )}
 

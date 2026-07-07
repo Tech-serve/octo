@@ -98,9 +98,8 @@ const config = {
   cookieSecure: bool(process.env.COOKIE_SECURE, false),
   // Разрешённый источник для встраивания в iframe (домен таск-менеджера).
   frameAncestor: process.env.FRAME_ANCESTOR || '',
-  // Роли, которым разрешён вход в бота. Временно head/admin; чтобы вернуть
-  // баеров — поставить BOT_ALLOWED_ROLES=buyer,admin в .env.
-  botAllowedRoles: (process.env.BOT_ALLOWED_ROLES || 'head,admin')
+  // Роли, которым разрешён вход в бота. Открыто баерам (+ head/admin).
+  botAllowedRoles: (process.env.BOT_ALLOWED_ROLES || 'buyer,head,admin')
     .split(',').map((s) => s.trim().toLowerCase().replace(/[\s-]+/g, '_')).filter(Boolean),
 };
 
