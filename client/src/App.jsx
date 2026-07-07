@@ -27,6 +27,12 @@ const ssoReady = (async () => {
   window.history.replaceState({}, '', url.pathname + url.search)
 })()
 
+// В проде бот открывается только внутри кабинета (в iframe). Прямой заход на
+// домен показывает заглушку. Локально (localhost) работает standalone — для отладки.
+const IS_EMBEDDED = typeof window !== 'undefined' && window.self !== window.top
+const IS_LOCAL = typeof location !== 'undefined'
+  && /^(localhost|127\.0\.0\.1)$/.test(location.hostname)
+
 // Показываем только профили с тегами Fakes / Sweeps (матчим по вхождению слов).
 const ALLOWED_TAGS = ['Fakes', 'Sweeps']
 const TAG_KEYWORDS = ['fake', 'sweep']
@@ -835,6 +841,14 @@ function App() {
     { m: 2, label: 'Режим 2 · один пост → много фейков' },
     { m: 3, label: 'Режим 3 · диалоги (дерево)' },
   ]
+
+  if (!IS_EMBEDDED && !IS_LOCAL) {
+    return (
+      <div style={{ maxWidth: '560px', margin: '80px auto', padding: '24px', textAlign: 'center', color: 'var(--muted)' }}>
+        Этот инструмент доступен только из рабочего кабинета.
+      </div>
+    )
+  }
 
   if (!authReady) {
     return (
