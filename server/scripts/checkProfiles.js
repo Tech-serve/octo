@@ -61,16 +61,24 @@ async function main() {
   const wl = store.listWhitelist();
   const flags = store.listFlags();
 
-  // Берём: кого НЕТ в whitelist (нет имени) ИЛИ статус «ошибка»/«прокси»
-  // (перепроверяем — оба технические и могут пройти со второго раза).
+  // Берём профиль на проверку если:
+  //  • он помечен технической ошибкой (error/proxy) — перепроверяем;
+  //  • ИЛИ у него нет имени в whitelist (не открывали / имя не считалось),
+  //    и при этом он НЕ в известном проблемном статусе (checkpoint/бан/разлогин —
+  //    их не гоняем повторно, статус уже известен).
   const retryReasons = new Set(['error', 'proxy']);
-  const needsCheck = (p) => !wl[p.uuid] || (flags[p.uuid] && retryReasons.has(flags[p.uuid].reason));
+  const needsCheck = (p) => {
+    const flag = flags[p.uuid];
+    if (flag) return retryReasons.has(flag.reason);
+    const w = wl[p.uuid];
+    return !w || !w.fbName;
+  };
 
   let todo = all;
   if (!args.all) todo = todo.filter(needsCheck);
   if (args.tag) todo = todo.filter((p) => (p.tags || []).includes(args.tag));
 
-  const noName = all.filter((p) => !wl[p.uuid]).length;
+  const noName = all.filter((p) => !wl[p.uuid] || !wl[p.uuid].fbName).length;
   const errCount = all.filter((p) => flags[p.uuid] && flags[p.uuid].reason === 'error').length;
   console.log(`Всего профилей: ${all.length}. Без имени (нет в whitelist): ${noName}, со статусом «ошибка»: ${errCount}. К проверке: ${todo.length}`);
   if (args.tag) console.log(`Фильтр по тегу: "${args.tag}"`);
