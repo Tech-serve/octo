@@ -912,10 +912,22 @@ function App() {
   const [busy, setBusy] = useState({})
   const [busyAt, setBusyAt] = useState(() => Date.now())
 
-  const [activeMode, setActiveMode] = useState(1)
+  const [activeMode, setActiveMode] = useState(() => {
+    try {
+      const v = localStorage.getItem('octobot:activeMode')
+      if (v === 'history') return 'history'
+      const n = Number(v)
+      return (n === 1 || n === 2 || n === 3) ? n : 1
+    } catch { return 1 }
+  })
   const [tabs, setTabs] = useState({ 1: [{ id: 1 }], 2: [{ id: 1 }], 3: [{ id: 1 }] })
   const [activeId, setActiveId] = useState({ 1: 1, 2: 1, 3: 1 })
   const nextId = useRef({ 1: 2, 2: 2, 3: 2 })
+
+  // Запоминаем активную вкладку режима, чтобы не слетала при обновлении страницы.
+  useEffect(() => {
+    try { localStorage.setItem('octobot:activeMode', String(activeMode)) } catch { /* ignore */ }
+  }, [activeMode])
 
   const loadProfiles = async () => {
     setLoadingProfiles(true)
