@@ -271,12 +271,25 @@ async function findFocusedEditable(page) {
 // (FB обычно сразу фокусирует ответ), затем — редактируемое поле РЯДОМ с этим же
 // комментарием (реплай-бокс появляется вложенно под ним). НЕ возвращает верхний
 // композер страницы — иначе улетел бы топ-коммент вместо ответа.
-async function waitReplyBox(page, timeoutMs) {
+// Найти НОВОЕ редактируемое поле, появившееся после клика «Ответить» = reply-бокс.
+// Существующие поля (в т.ч. главный композер) заранее помечаются data-pre-reply,
+// поэтому берём то, что БЕЗ этой метки. FB не всегда фокусирует reply-бокс сам,
+// так что ищем по DOM, а не по фокусу.
+async function findNewEditable(page, timeoutMs) {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     // eslint-disable-next-line no-await-in-loop
-    const focused = await findFocusedEditable(page);
-    if (focused) return focused;
+    const h = await page.evaluateHandle(() => {
+      const els = document.querySelectorAll('div[contenteditable="true"], div[role="textbox"][contenteditable="true"]');
+      for (const el of els) {
+        if (el.hasAttribute('data-pre-reply')) continue;
+        const r = el.getBoundingClientRect();
+        if (r.width > 20 && r.height > 5) return el;
+      }
+      return null;
+    });
+    const el = h.asElement();
+    if (el) return el;
     // eslint-disable-next-line no-await-in-loop
     await sleep(300);
   }
@@ -425,13 +438,18 @@ async function leaveFacebookComment(payload, log, handle = {}) {
       await target.scrollIntoViewIfNeeded().catch(() => {});
       await sleep(rand(500, 1200));
       ensureLive();
+      // Метим существующие редактируемые поля — чтобы после «Ответить» отличить
+      // НОВОЕ (reply-бокс) от главного композера.
+      await page.evaluate(() => {
+        document.querySelectorAll('div[contenteditable="true"], div[role="textbox"]')
+          .forEach((el) => el.setAttribute('data-pre-reply', '1'));
+      }).catch(() => {});
       const clicked = await clickReply(page, target, log);
       if (!clicked) throw new Error('Не найдена кнопка «Ответить» у комментария');
       await sleep(rand(700, 1500));
-      // Берём ИМЕННО реплай-бокс. НЕ откатываемся на верхний композер — иначе
-      // улетел бы обычный топ-коммент, а не ответ на реплику.
-      commentBox = await waitReplyBox(page, 7000);
-      if (!commentBox) throw new Error('Не открылось поле ответа (reply-box в фокусе) — как ответ коммент не отправлен.');
+      // Берём ИМЕННО новый reply-бокс (не главный композер).
+      commentBox = await findNewEditable(page, 8000);
+      if (!commentBox) throw new Error('Не открылось поле ответа (reply-box) — как ответ коммент не отправлен.');
     } else {
       // ВЕРХНЕУРОВНЕВЫЙ КОММЕНТ: скролл к полю с ранней остановкой.
       log.info('[FB Bot] Ищу поле для комментария...');
@@ -462,11 +480,11 @@ async function leaveFacebookComment(payload, log, handle = {}) {
 
     ensureLive();
     if (replyToText) {
-      // РЕЖИМ ОТВЕТА: reply-бокс уже открыт и в фокусе после «Ответить». Повторный
-      // scrollIntoView/клик в модалке закрывают инлайн-ответ и уводят ввод в
-      // ГЛАВНЫЙ композер → получался топ-коммент. Поэтому просто печатаем в него.
-      log.info('[FB Bot] Печатаю ответ в reply-бокс (без повторного клика)...');
-      await commentBox.focus().catch(() => {});
+      // РЕЖИМ ОТВЕТА: commentBox — это НОВЫЙ reply-бокс (не главный композер).
+      // Кликаем ИМЕННО по нему и печатаем. Без scrollIntoView — он и так виден
+      // рядом с комментом, а лишний скролл может закрыть инлайн-ответ.
+      log.info('[FB Bot] Кликаю по reply-боксу и печатаю ответ...');
+      await humanClick(page, commentBox);
       await sleep(rand(300, 700));
     } else {
       // Довести поле в зону видимости и «дочитать» перед кликом.
