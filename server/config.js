@@ -75,9 +75,9 @@ const config = {
   // все одновременно) и не позже MODE2_SPREAD.
   mode2SpreadMs: Math.max(1, num(process.env.MODE2_SPREAD, 3)) * 60000,
   mode2MinMs: Math.max(0, num(process.env.MODE2_MIN, 0.5)) * 60000,
-  // Режим 3 (диалоги): пауза между репликами одного диалога, минуты.
-  mode3GapMinMs: Math.max(0, num(process.env.MODE3_GAP_MIN, 1)) * 60000,
-  mode3GapMaxMs: Math.max(0, num(process.env.MODE3_GAP_MAX, 5)) * 60000,
+  // Режим 3 (диалоги): пауза между репликами одного диалога, минуты. 0.5–1.5 = 30–90 сек.
+  mode3GapMinMs: Math.max(0, num(process.env.MODE3_GAP_MIN, 0.5)) * 60000,
+  mode3GapMaxMs: Math.max(0, num(process.env.MODE3_GAP_MAX, 1.5)) * 60000,
   // Минимальный зазор между задачами ОДНОГО фейка (умное заполнение окон):
   // новая задача встаёт в самое раннее окно, где до соседних задач ≥ этого.
   minFakeGapMinMs: Math.max(0, num(process.env.MIN_FAKE_GAP_MIN, 1)) * 60000,

@@ -336,7 +336,7 @@ function Operation({
       const steps = kept.map((s, ni) => ({
         profileUuid: s.profileUuid,
         text: s.text.trim(),
-        replyTo: ni === 0 ? null : (s.replyTo != null && map[s.replyTo] != null ? map[s.replyTo] : 0),
+        replyTo: ni === 0 ? null : Math.min(ni - 1, Math.max(0, (s.replyTo != null && map[s.replyTo] != null) ? map[s.replyTo] : 0)),
         image: s.image || null,
       }))
       return { steps }

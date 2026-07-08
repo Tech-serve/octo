@@ -153,7 +153,11 @@ app.post('/api/tasks', ownerMiddleware, (req, res) => {
           logger.warn(`Не удалось сохранить картинку: ${err.message}`, 'api');
         }
 
-        const replyToText = (s.replyTo != null && d.steps[s.replyTo]) ? d.steps[s.replyTo].text : null;
+        // Ответ идёт на БОЛЕЕ РАННИЙ шаг (индекс < idx). Если индекс битый/устарел
+        // (например, остался после удаления реплик и указывает на себя/будущее) —
+        // по умолчанию отвечаем на корень ветки (шаг 0 = верхний коммент).
+        const rt = (s.replyTo != null && s.replyTo < idx && d.steps[s.replyTo]) ? s.replyTo : (idx > 0 ? 0 : null);
+        const replyToText = (rt != null && d.steps[rt]) ? d.steps[rt].text : null;
         const dependsOn = idx > 0 ? stepTasks[idx - 1].id : null;
 
         const task = store.createTask(
