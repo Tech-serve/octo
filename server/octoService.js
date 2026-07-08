@@ -250,6 +250,20 @@ async function connectToOcto(profileUuid, log) {
   const browser = await chromium.connectOverCDP(wsEndpoint, { timeout: config.cdpConnectTimeoutMs });
   const contexts = browser.contexts();
   const context = contexts[0] || (await browser.newContext());
+
+  // Страховка поверх Octo: прячем главный след автоматизации — navigator.webdriver
+  // (может протекать true при управлении через CDP, и сайты читают его как «бот»).
+  // Больше НИЧЕГО не трогаем, чтобы не конфликтовать с антидетект-отпечатком Octo.
+  try {
+    await context.addInitScript(() => {
+      try {
+        Object.defineProperty(navigator, 'webdriver', { get: () => false, configurable: true });
+      } catch (e) { /* свойство уже переопределено — ок */ }
+    });
+  } catch (e) {
+    log.warn(`[Octo] Не удалось поставить маску webdriver: ${e.message}`);
+  }
+
   const page = context.pages()[0] || (await context.newPage());
 
   // Блокируем видео до навигации, чтобы автоплей-ролики не грузились вовсе.

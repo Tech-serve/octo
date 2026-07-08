@@ -333,6 +333,12 @@ async function leaveFacebookComment(payload, log, handle = {}) {
     log.info(`[FB Bot] Переход на пост: ${postUrl}`);
     await page.goto(postUrl, { waitUntil: 'domcontentloaded', timeout: config.navTimeout });
 
+    // Контроль маски автоматизации: в норме должно быть false (не «бот»).
+    try {
+      const wd = await page.evaluate(() => navigator.webdriver);
+      log.info(`[FB Bot] navigator.webdriver = ${wd}`);
+    } catch { /* ignore */ }
+
     // Первичное «осматривание» страницы: движение мышью + пауза чтения,
     // пропорциональная объёму текста на странице.
     await idleMouse(page);
