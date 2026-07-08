@@ -282,19 +282,23 @@ async function attachImage(page, imagePath, log) {
 // Берём устойчивый фрагмент начала текста (хвост варьируется уникализатором).
 // FB часто чистит поле, но коммент придерживает как спам — поле «очистилось» ≠
 // «опубликовано». Скроллим и ждём, т.к. коммент подгружается не мгновенно.
-async function verifyCommentPosted(page, text, log, timeoutMs = 14000) {
-  const snippet = String(text || '').replace(/\s+/g, ' ').trim().slice(0, 55);
+async function verifyCommentPosted(page, text, log, timeoutMs = 16000) {
+  // Чистим от эмодзи/пунктуации: FB рисует эмодзи картинками, они НЕ попадают в
+  // textContent, и строгое совпадение ломалось (хвост-эмодзи уникализатора не
+  // находился). Берём короткое «ядро» из букв/цифр начала текста.
+  const clean = (s) => String(s || '').toLowerCase().replace(/\s+/g, ' ').replace(/[^\p{L}\p{N} ]+/gu, '').trim();
+  const snippet = clean(text).slice(0, 30);
   if (snippet.length < 6) return true; // слишком короткий текст — не проверяем
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     // eslint-disable-next-line no-await-in-loop
     const found = await page.evaluate((snip) => {
-      const norm = (s) => (s || '').replace(/\s+/g, ' ');
+      const clean2 = (s) => String(s || '').toLowerCase().replace(/\s+/g, ' ').replace(/[^\p{L}\p{N} ]+/gu, '').trim();
       // Только внутри комментов (article), НЕ в поле ввода — иначе оставшийся
       // черновик дал бы ложное «подтверждено».
       const arts = document.querySelectorAll('div[role="article"]');
       for (const n of arts) {
-        if (norm(n.textContent || '').includes(snip)) return true;
+        if (clean2(n.textContent || '').includes(snip)) return true;
       }
       return false;
     }, snippet);
