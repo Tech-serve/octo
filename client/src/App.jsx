@@ -658,6 +658,16 @@ function Operation({
               style={{ height: '80px' }}
             />
           ))}
+          <div>
+            <button
+              type="button"
+              className="tm-btn tm-btn-outline"
+              onClick={() => setPerComments([])}
+              style={{ fontSize: '13px' }}
+            >
+              🗑 Удалить дубли (создать заново)
+            </button>
+          </div>
         </>
       )}
       </>
