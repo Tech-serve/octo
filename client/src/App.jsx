@@ -384,13 +384,20 @@ function Operation({
 
     setSubmitting(true)
     try {
-      const payloadEntries = await Promise.all(list.map(async (e) => ({
-        profileUuid: e.profileUuid,
-        commentText: e.comment,
-        image: e.image ? await varyImage(e.image) : null,
-      })))
-      const { data } = await axios.post(`${API_BASE}/api/tasks`, { postUrl: url, entries: payloadEntries })
-      setTasks((data.tasks || []).map((t) => ({
+      // По ОДНОМУ фейку за запрос: тело с N картинками рвёт туннель (502).
+      // staggerIndex сохраняет разброс старта (первый сразу, остальные со сдвигом).
+      let collected = []
+      for (let i = 0; i < list.length; i += 1) {
+        const e = list[i]
+        const image = e.image ? await varyImage(e.image) : null
+        const { data } = await axios.post(`${API_BASE}/api/tasks`, {
+          postUrl: url,
+          entries: [{ profileUuid: e.profileUuid, commentText: e.comment, image }],
+          staggerIndex: i,
+        })
+        collected = collected.concat(data.tasks || [])
+      }
+      setTasks(collected.map((t) => ({
         id: t.taskId,
         status: t.status,
         postUrl: t.postUrl,

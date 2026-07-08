@@ -230,12 +230,16 @@ app.post('/api/tasks', ownerMiddleware, (req, res) => {
     const reqNow = Date.now();
     const spread = config.mode2SpreadMs;
     const minOff = config.mode2MinMs;
+    // Номер фейка в пачке — фронт шлёт по одному фейку за запрос (чтобы не раздувать
+    // тело картинками и не ловить 502). По нему решаем: старт сразу (0) или со сдвигом.
+    const reqStagger = (req.body && Number.isInteger(req.body.staggerIndex)) ? req.body.staggerIndex : null;
 
     const created = list.map((e, idx) => {
       // Первый фейк — СРАЗУ (не ждём). Остальные — в случайный момент в окне
       // [MODE2_MIN, MODE2_SPREAD] минут: не раньше минимума (чтобы не стартовали
       // одновременно с первым) и не позже разброса. И не раньше, чем сам фейк освободится.
-      const offset = idx === 0 ? 0 : minOff + Math.round(Math.random() * Math.max(0, spread - minOff));
+      const sIdx = reqStagger != null ? reqStagger : idx;
+      const offset = sIdx === 0 ? 0 : minOff + Math.round(Math.random() * Math.max(0, spread - minOff));
       const scheduledAt = queue.earliestSlot(e.profileUuid, reqNow + offset, reqNow);
 
       let imagePath = null;
