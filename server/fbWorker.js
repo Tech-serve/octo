@@ -278,6 +278,35 @@ async function attachImage(page, imagePath, log) {
   return true;
 }
 
+// Честная проверка публикации: реально ищем НАШ текст среди комментов на посте.
+// Берём устойчивый фрагмент начала текста (хвост варьируется уникализатором).
+// FB часто чистит поле, но коммент придерживает как спам — поле «очистилось» ≠
+// «опубликовано». Скроллим и ждём, т.к. коммент подгружается не мгновенно.
+async function verifyCommentPosted(page, text, log, timeoutMs = 14000) {
+  const snippet = String(text || '').replace(/\s+/g, ' ').trim().slice(0, 55);
+  if (snippet.length < 6) return true; // слишком короткий текст — не проверяем
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    // eslint-disable-next-line no-await-in-loop
+    const found = await page.evaluate((snip) => {
+      const norm = (s) => (s || '').replace(/\s+/g, ' ');
+      // Только внутри комментов (article), НЕ в поле ввода — иначе оставшийся
+      // черновик дал бы ложное «подтверждено».
+      const arts = document.querySelectorAll('div[role="article"]');
+      for (const n of arts) {
+        if (norm(n.textContent || '').includes(snip)) return true;
+      }
+      return false;
+    }, snippet);
+    if (found) return true;
+    // eslint-disable-next-line no-await-in-loop
+    await humanScroll(page, { bursts: 1 });
+    // eslint-disable-next-line no-await-in-loop
+    await sleep(rand(900, 1500));
+  }
+  return false;
+}
+
 async function leaveFacebookComment(payload, log, handle = {}) {
   const {
     profileUuid, postUrl, commentText, imagePath, replyToText,
@@ -415,20 +444,23 @@ async function leaveFacebookComment(payload, log, handle = {}) {
     await submitComment(page, log);
     await sleep(rand(3500, 6000));
 
-    // Проверка результата: если поле очистилось — комментарий, скорее всего, ушёл.
-    let posted = false;
+    // Поле очистилось — это лишь косвенный признак. Честная проверка ниже.
+    let fieldCleared = false;
     try {
       const leftover = (await commentBox.innerText().catch(() => '')).trim();
-      posted = leftover.length === 0;
+      fieldCleared = leftover.length === 0;
     } catch {
-      posted = true; // поле пропало из DOM — обычно это признак успешной отправки
+      fieldCleared = true; // поле пропало из DOM
     }
 
-    if (posted) {
-      log.info(`[FB Bot] Комментарий отправлен, поле очистилось. Профиль ${profileUuid}`);
-    } else {
-      log.warn('[FB Bot] Текст всё ещё в поле — возможно, комментарий не отправился (проверьте вручную)');
+    // ЧЕСТНАЯ ПРОВЕРКА: реально ищем наш текст среди комментов. Не нашли —
+    // считаем, что FB придержал/не опубликовал (не выдаём ложное «Готово»).
+    log.info('[FB Bot] Проверяю, появился ли коммент на посте...');
+    const confirmed = await verifyCommentPosted(page, commentText, log);
+    if (!confirmed) {
+      throw new Error('Коммент не подтверждён: не найден на посте (вероятно, FB придержал как спам). Проверьте вручную.');
     }
+    log.info(`[FB Bot] Коммент подтверждён на посте${fieldCleared ? '' : ' (поле не очистилось, но текст есть)'}. Профиль ${profileUuid}`);
 
     // Захват реальной FB-идентичности (id из c_user, имя из страницы) — для
     // белого списка. Сессия сейчас гарантированно валидна и на FB-странице.

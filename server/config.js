@@ -64,8 +64,8 @@ const config = {
   blockVideo: bool(process.env.BLOCK_VIDEO, true),
   // Пауза (в минутах) между постами ОДНОГО профиля: случайно в [min, max].
   // Первый пост профиля идёт сразу, каждый следующий — через случайную паузу.
-  postDelayMinMs: Math.max(0, num(process.env.POST_DELAY_MIN, 1)) * 60000,
-  postDelayMaxMs: Math.max(0, num(process.env.POST_DELAY_MAX, 2)) * 60000,
+  postDelayMinMs: Math.max(0, num(process.env.POST_DELAY_MIN, 2)) * 60000,
+  postDelayMaxMs: Math.max(0, num(process.env.POST_DELAY_MAX, 6)) * 60000,
   // Режим 2 (один пост -> много фейков): случайный разброс времени старта
   // каждого фейка в окне [MODE2_MIN, MODE2_SPREAD] минут (то же для старта диалогов реж.3).
   // Первый фейк — сразу; каждый следующий — не раньше MODE2_MIN (чтобы не стартовали
@@ -77,8 +77,8 @@ const config = {
   mode3GapMaxMs: Math.max(0, num(process.env.MODE3_GAP_MAX, 5)) * 60000,
   // Минимальный зазор между задачами ОДНОГО фейка (умное заполнение окон):
   // новая задача встаёт в самое раннее окно, где до соседних задач ≥ этого.
-  minFakeGapMinMs: Math.max(0, num(process.env.MIN_FAKE_GAP_MIN, 1)) * 60000,
-  minFakeGapMaxMs: Math.max(0, num(process.env.MIN_FAKE_GAP_MAX, 3)) * 60000,
+  minFakeGapMinMs: Math.max(0, num(process.env.MIN_FAKE_GAP_MIN, 2)) * 60000,
+  minFakeGapMaxMs: Math.max(0, num(process.env.MIN_FAKE_GAP_MAX, 5)) * 60000,
 
   // Авторизация. Выключена (standalone) — работает как раньше, без входа,
   // владелец задач = 'local'. Включена (встроен в таск-менеджер) — приходит
