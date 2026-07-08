@@ -273,7 +273,18 @@ async function connectToOcto(profileUuid, log, opts = {}) {
   const browser = await chromium.connectOverCDP(wsEndpoint, { timeout: config.cdpConnectTimeoutMs });
   const contexts = browser.contexts();
   const context = contexts[0] || (await browser.newContext());
-  const page = context.pages()[0] || (await context.newPage());
+
+  // Профиль Octo часто открывает кучу вкладок (сохранённая сессия) — они грузятся,
+  // едят ресурсы и тормозят старт. Оставляем ОДНУ вкладку для работы, остальные
+  // закрываем, чтобы не ждать их прогрузку.
+  const openPages = context.pages();
+  const page = openPages[0] || (await context.newPage());
+  for (const p of openPages) {
+    if (p === page) continue;
+    // eslint-disable-next-line no-await-in-loop
+    try { await p.close({ runBeforeUnload: false }); } catch { /* ignore */ }
+  }
+  if (openPages.length > 1) log.info(`[Octo] Закрыл лишние вкладки: было ${openPages.length}, оставил 1.`);
 
   // Блокируем видео до навигации, чтобы автоплей-ролики не грузились вовсе.
   if (config.blockVideo) {
