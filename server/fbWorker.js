@@ -95,25 +95,62 @@ async function findCommentBox(page, timeoutMs) {
 // требует знать подпись кнопки). Иногда, по персоне, пробуем по-человечески
 // кликнуть кнопку отправки, но только если уверенно нашли её по известной
 // подписи И внутри диалога/композера — чтобы ничего лишнего не нажать.
-async function submitComment(page, log) {
-  if (Math.random() < getPersona(page).prefersButton) {
-    const build = (prefix) => SEND_ARIA
-      .map((l) => `${prefix}[role="button"][aria-label*="${l}" i]`)
-      .join(', ');
-    // Сначала строго внутри модального окна, затем — на странице.
-    for (const sel of [build('div[role="dialog"] '), build('')]) {
-      const btn = await page.$(sel).catch(() => null);
-      if (!btn) continue;
-      const box = await btn.boundingBox().catch(() => null);
-      if (box && box.width > 0 && box.height > 0) {
-        log.info('[FB Bot] Отправка кликом по кнопке');
-        await humanClick(page, btn);
-        return;
-      }
+// Пусто ли поле комментария (FB его очищает после отправки). Пропал из DOM —
+// тоже считаем отправленным.
+async function commentFieldEmpty(box) {
+  try {
+    const t = (await box.innerText().catch(() => '')) || '';
+    return t.trim().length === 0;
+  } catch {
+    return true;
+  }
+}
+
+// Клик по кнопке отправки (если FB её показывает) — по подписи на многих языках.
+async function clickSendButton(page, log) {
+  const build = (prefix) => SEND_ARIA
+    .map((l) => `${prefix}[role="button"][aria-label*="${l}" i]`)
+    .join(', ');
+  for (const sel of [build('div[role="dialog"] '), build('')]) {
+    // eslint-disable-next-line no-await-in-loop
+    const btn = await page.$(sel).catch(() => null);
+    if (!btn) continue;
+    // eslint-disable-next-line no-await-in-loop
+    const box = await btn.boundingBox().catch(() => null);
+    if (box && box.width > 0 && box.height > 0) {
+      log.info('[FB Bot] Отправка кликом по кнопке');
+      // eslint-disable-next-line no-await-in-loop
+      await humanClick(page, btn);
+      return true;
     }
   }
-  log.info('[FB Bot] Отправка клавишей Enter (язык-независимо)');
-  await page.keyboard.press('Enter');
+  return false;
+}
+
+// Отправка коммента. ГЛАВНОЕ — перед Enter вернуть фокус В ПОЛЕ: после печати,
+// движений мыши и прикрепления картинки фокус мог соскочить, и Enter уходил «в
+// никуда» (текст оставался, коммент не отправлялся). Схема: фокус+Enter → если
+// поле не очистилось, пробуем кнопку → ещё раз Enter.
+async function submitComment(page, commentBox, log) {
+  const enterOnField = async () => {
+    try { await commentBox.focus(); } catch { /* ignore */ }
+    await sleep(rand(150, 400));
+    try { await commentBox.press('Enter'); } catch { await page.keyboard.press('Enter').catch(() => {}); }
+  };
+
+  log.info('[FB Bot] Отправка: фокус в поле + Enter');
+  await enterOnField();
+  await sleep(rand(1500, 2500));
+  if (await commentFieldEmpty(commentBox)) return;
+
+  log.info('[FB Bot] Поле не очистилось — пробую кнопку отправки');
+  if (await clickSendButton(page, log)) {
+    await sleep(rand(1500, 2500));
+    if (await commentFieldEmpty(commentBox)) return;
+  }
+
+  log.info('[FB Bot] Ещё одна попытка: фокус + Enter');
+  await enterOnField();
 }
 
 // Признаки того, что FB показал проверку/капчу/логин, и продолжать нельзя.
@@ -445,7 +482,7 @@ async function leaveFacebookComment(payload, log, handle = {}) {
     block = await detectBlock(page);
     if (block) throw new Error(`Действие прервано перед отправкой: ${block}.`);
 
-    await submitComment(page, log);
+    await submitComment(page, commentBox, log);
     await sleep(rand(3500, 6000));
 
     // Поле очистилось — это лишь косвенный признак. Честная проверка ниже.
