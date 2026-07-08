@@ -320,7 +320,7 @@ async function leaveFacebookComment(payload, log, handle = {}) {
   const ensureLive = () => { if (handle.canceled) throw new Error('Операция отменена пользователем'); };
 
   try {
-    connection = await connectToOcto(profileUuid, log);
+    connection = await connectToOcto(profileUuid, log, { forceRestart: true });
     handle.browser = connection.browser; // чтобы очередь могла закрыть сессию при отмене
     const { page } = connection;
 

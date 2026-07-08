@@ -214,7 +214,7 @@ async function detectAccountStatus(page) {
   return 'ok';
 }
 
-async function connectToOcto(profileUuid, log) {
+async function connectToOcto(profileUuid, log, opts = {}) {
   log.info(`[Octo] Запуск профиля ${profileUuid}...`);
 
   const startProfile = () => axios.post(`${OCTO_LOCAL_API}/start`, {
@@ -233,11 +233,34 @@ async function connectToOcto(profileUuid, log) {
   try {
     response = await startProfile();
   } catch (e) {
-    // НЕ трогаем уже запущенные профили — в них может работать человек. Просто
-    // сообщаем реальную причину отказа Octo и идём дальше.
-    const err = new Error(`Octo отказал в запуске: ${octoDetail(e)}`);
-    err.octoStatus = e.response && e.response.status;
-    throw err;
+    const detail = octoDetail(e);
+    // Для постинга (forceRestart) зависший открытым профиль ГАСИМ и стартуем
+    // заново — иначе задача падает. Массовая проверка forceRestart НЕ передаёт,
+    // поэтому там чужие открытые профили остаются в покое.
+    if (opts.forceRestart && /already started|уже запущ/i.test(detail)) {
+      log.info('[Octo] Профиль уже запущен — принудительно закрываю и запускаю заново...');
+      let lastErr = e;
+      for (const waitMs of [2000, 5000]) {
+        try { await axios.post(`${OCTO_LOCAL_API}/stop`, { uuid: profileUuid }); } catch { /* ignore */ }
+        // eslint-disable-next-line no-await-in-loop
+        await new Promise((r) => setTimeout(r, waitMs));
+        try {
+          // eslint-disable-next-line no-await-in-loop
+          response = await startProfile();
+          lastErr = null;
+          break;
+        } catch (e2) { lastErr = e2; }
+      }
+      if (lastErr) {
+        const err = new Error(`Octo отказал в запуске (после принудительного рестарта): ${octoDetail(lastErr)}`);
+        err.octoStatus = lastErr.response && lastErr.response.status;
+        throw err;
+      }
+    } else {
+      const err = new Error(`Octo отказал в запуске: ${detail}`);
+      err.octoStatus = e.response && e.response.status;
+      throw err;
+    }
   }
 
   // Octo возвращает поле ws_endpoint (оставляем ws как запасной вариант для совместимости)
