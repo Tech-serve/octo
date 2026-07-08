@@ -280,8 +280,10 @@ async function waitReplyBox(page, commentEl, timeoutMs) {
 
     // eslint-disable-next-line no-await-in-loop
     const near = await commentEl.evaluateHandle((node) => {
+      // Ищем reply-бокс близко к комменту (до 4 уровней вверх) — чтобы не наткнуться
+      // на главный композер страницы, который лежит далеко в дереве.
       let c = node;
-      for (let up = 0; up < 8 && c; up += 1) {
+      for (let up = 0; up < 4 && c; up += 1) {
         const box = c.querySelector('div[role="textbox"][contenteditable="true"], div[contenteditable="true"]');
         if (box) return box;
         c = c.parentElement;
