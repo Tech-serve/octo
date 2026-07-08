@@ -39,7 +39,10 @@ function handleSsoAccept(req, res) {
     }
 
     const roles = Array.isArray(payload.roles) ? payload.roles.map(norm) : [];
-    if (!roles.some((r) => config.botAllowedRoles.includes(r))) {
+    // Пускаем по разрешённой роли ИЛИ по наличию buyer_code (в кабинете баер
+    // определяется кодом, роль может называться иначе).
+    const hasBuyerCode = !!(payload.buyer_code || payload.buyerCode);
+    if (!hasBuyerCode && !roles.some((r) => config.botAllowedRoles.includes(r))) {
       return res.status(403).json({ error: 'Доступ ограничен' });
     }
 
