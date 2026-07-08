@@ -191,6 +191,8 @@ function Operation({
   const [opImage, setOpImage] = useState(saved.opImage || null)
   const [opImageName, setOpImageName] = useState(saved.opImageName || '')
   const [commentText, setCommentText] = useState(saved.commentText || '')
+  // Режим 1: свой текст на каждый пост (когда баер размножил поля). Пусто = общий текст.
+  const [perComments, setPerComments] = useState(saved.perComments || [])
   const [tasks, setTasks] = useState(saved.tasks || [])
   const [error, setError] = useState('')
   const [submitting, setSubmitting] = useState(false)
@@ -212,7 +214,7 @@ function Operation({
   // сохраняем без base64 (текст/фейки/результаты остаются).
   useEffect(() => {
     const data = {
-      profileUuid, posts, commentText, tasks, post2, entries, post3, dialogs, opImage, opImageName,
+      profileUuid, posts, commentText, perComments, tasks, post2, entries, post3, dialogs, opImage, opImageName,
     }
     try {
       localStorage.setItem(storageKey, JSON.stringify(data))
@@ -225,7 +227,7 @@ function Operation({
         }))
       } catch { /* совсем не влезло — пропустим */ }
     }
-  }, [storageKey, profileUuid, posts, commentText, tasks, post2, entries, post3, dialogs, opImage, opImageName])
+  }, [storageKey, profileUuid, posts, commentText, perComments, tasks, post2, entries, post3, dialogs, opImage, opImageName])
 
   // Метка занятости профиля: «занят до 14:32» (уже идёт) или «занят с 15:10».
   const profileBusy = (uuid) => {
@@ -265,8 +267,15 @@ function Operation({
   }, [tasks])
 
   const patchPost = (i, patch) => setPosts((p) => p.map((x, idx) => (idx === i ? { ...x, ...patch } : x)))
-  const addPost = () => setPosts((p) => (p.length >= MAX_POSTS ? p : [...p, { url: '', image: null, imageName: '' }]))
-  const removePost = (i) => setPosts((p) => (p.length === 1 ? p : p.filter((_, idx) => idx !== i)))
+  const addPost = () => {
+    setPosts((p) => (p.length >= MAX_POSTS ? p : [...p, { url: '', image: null, imageName: '' }]))
+    // Держим поля «свой текст» в такт числу постов.
+    setPerComments((arr) => (arr.length === 0 || arr.length >= MAX_POSTS ? arr : [...arr, commentText]))
+  }
+  const removePost = (i) => {
+    setPosts((p) => (p.length === 1 ? p : p.filter((_, idx) => idx !== i)))
+    setPerComments((arr) => (arr.length <= 1 ? arr : arr.filter((_, idx) => idx !== i)))
+  }
 
   const pickOpImage = (file) => {
     if (!file) return
@@ -402,30 +411,36 @@ function Operation({
     if (mode === 3) { await startMode3(); return }
     if (mode === 2) { await startMode2(); return }
     setError('')
-    const rawItems = posts
-      .map((p) => ({ url: (p.url || '').trim() }))
+    const filled = posts
+      .map((p, i) => ({ url: (p.url || '').trim(), i }))
       .filter((p) => p.url)
     if (!profileUuid) { setError('Выберите профиль'); return }
-    if (rawItems.length === 0) { setError('Добавьте хотя бы одну ссылку на пост'); return }
-    if (!commentText.trim()) { setError('Введите текст комментария'); return }
+    if (filled.length === 0) { setError('Добавьте хотя бы одну ссылку на пост'); return }
+
+    // Свой текст на каждый пост, если баер размножил поля; иначе — общий.
+    const perMode = perComments.length > 0
+    const commentFor = (idx) => (perMode ? (perComments[idx] ?? commentText) : commentText)
+    if (perMode) {
+      if (filled.some((it) => !commentFor(it.i).trim())) { setError('Заполни текст для каждого поста'); return }
+    } else if (!commentText.trim()) { setError('Введите текст комментария'); return }
 
     setSubmitting(true)
     try {
       let collected = []
-      if (opImage) {
-        // С картинкой шлём ПО ОДНОМУ посту за запрос: N вариаций base64 в одном
-        // теле рвут туннель Cloudflare (502). Каждый пост — свой уникальный вариант.
-        for (const it of rawItems) {
-          const image = await varyImage(opImage)
+      if (opImage || perMode) {
+        // По одному посту за запрос: из-за размера тела с картинками (иначе 502)
+        // и чтобы у каждого поста ушёл свой текст.
+        for (const it of filled) {
+          const image = opImage ? await varyImage(opImage) : null
           const { data } = await axios.post(`${API_BASE}/api/tasks`, {
-            profileUuid, posts: [{ url: it.url, image }], commentText,
+            profileUuid, posts: [{ url: it.url, image }], commentText: commentFor(it.i),
           })
           collected = collected.concat(data.tasks || [])
         }
       } else {
         const { data } = await axios.post(`${API_BASE}/api/tasks`, {
           profileUuid,
-          posts: rawItems.map((it) => ({ url: it.url, image: null })),
+          posts: filled.map((it) => ({ url: it.url, image: null })),
           commentText,
         })
         collected = data.tasks || []
@@ -590,20 +605,61 @@ function Operation({
         ))}
       </div>
 
-      <div style={{ display: 'flex', gap: '6px', alignItems: 'flex-start' }}>
-        <ImagePicker
-          image={opImage}
-          imageName={opImageName}
-          onPick={pickOpImage}
-          onClear={() => { setOpImage(null); setOpImageName('') }}
-        />
-        <textarea
-          placeholder="Текст комментария (картинка слева — одна на все посты)"
-          value={commentText}
-          onChange={(e) => setCommentText(e.target.value)}
-          style={{ height: '100px', flex: 1 }}
-        />
-      </div>
+      {perComments.length === 0 ? (
+        <>
+          <div style={{ display: 'flex', gap: '6px', alignItems: 'flex-start' }}>
+            <ImagePicker
+              image={opImage}
+              imageName={opImageName}
+              onPick={pickOpImage}
+              onClear={() => { setOpImage(null); setOpImageName('') }}
+            />
+            <textarea
+              placeholder="Текст комментария (картинка слева — одна на все посты)"
+              value={commentText}
+              onChange={(e) => setCommentText(e.target.value)}
+              style={{ height: '100px', flex: 1 }}
+            />
+          </div>
+          <div>
+            <button
+              type="button"
+              className="tm-btn tm-btn-outline"
+              disabled={!commentText.trim()}
+              onClick={() => setPerComments(posts.map(() => commentText))}
+              style={{ fontSize: '13px' }}
+            >
+              ⧉ Дублировать по постам ({posts.length})
+            </button>
+          </div>
+        </>
+      ) : (
+        <>
+          <div style={{ display: 'flex', gap: '6px', alignItems: 'flex-start' }}>
+            <ImagePicker
+              image={opImage}
+              imageName={opImageName}
+              onPick={pickOpImage}
+              onClear={() => { setOpImage(null); setOpImageName('') }}
+            />
+            <textarea
+              placeholder="Текст для поста #1"
+              value={perComments[0] || ''}
+              onChange={(e) => setPerComments((arr) => arr.map((x, idx) => (idx === 0 ? e.target.value : x)))}
+              style={{ height: '100px', flex: 1 }}
+            />
+          </div>
+          {perComments.slice(1).map((c, k) => (
+            <textarea
+              key={k + 1}
+              placeholder={`Текст для поста #${k + 2}`}
+              value={c}
+              onChange={(e) => setPerComments((arr) => arr.map((x, idx) => (idx === k + 1 ? e.target.value : x)))}
+              style={{ height: '80px' }}
+            />
+          ))}
+        </>
+      )}
       </>
       )}
 
