@@ -785,7 +785,7 @@ function Operation({
                       <select value={s.replyTo != null ? s.replyTo : 0} onChange={(e) => patchStep(di, si, { replyTo: Number(e.target.value) })} style={{ padding: '4px 8px' }}>
                         {d.steps.slice(0, si).map((_, k) => (
                           <option key={k} value={k}>
-                            {k === 0 ? 'верхний коммент (в ветку / всем)' : `реплику ${k + 1} (ответ @одному)`}
+                            {`на реплику ${k + 1}${k === 0 ? ' (верхний коммент)' : ''}`}
                           </option>
                         ))}
                       </select>

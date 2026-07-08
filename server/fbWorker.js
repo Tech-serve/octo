@@ -267,6 +267,39 @@ async function findFocusedEditable(page) {
   return h.asElement();
 }
 
+// Дождаться именно РЕПЛАЙ-БОКСА после клика «Ответить». Сначала — поле в фокусе
+// (FB обычно сразу фокусирует ответ), затем — редактируемое поле РЯДОМ с этим же
+// комментарием (реплай-бокс появляется вложенно под ним). НЕ возвращает верхний
+// композер страницы — иначе улетел бы топ-коммент вместо ответа.
+async function waitReplyBox(page, commentEl, timeoutMs) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    // eslint-disable-next-line no-await-in-loop
+    const focused = await findFocusedEditable(page);
+    if (focused) return focused;
+
+    // eslint-disable-next-line no-await-in-loop
+    const near = await commentEl.evaluateHandle((node) => {
+      let c = node;
+      for (let up = 0; up < 8 && c; up += 1) {
+        const box = c.querySelector('div[role="textbox"][contenteditable="true"], div[contenteditable="true"]');
+        if (box) return box;
+        c = c.parentElement;
+      }
+      return null;
+    });
+    const el = near.asElement();
+    if (el) {
+      // eslint-disable-next-line no-await-in-loop
+      const box = await el.boundingBox().catch(() => null);
+      if (box && box.height > 0) return el;
+    }
+    // eslint-disable-next-line no-await-in-loop
+    await sleep(300);
+  }
+  return null;
+}
+
 // Прикрепить картинку к комментарию: находим input[type=file] в композере
 // (язык-независимо) и подставляем файл, ждём появления превью, затем отдаём.
 async function attachImage(page, imagePath, log) {
@@ -412,9 +445,10 @@ async function leaveFacebookComment(payload, log, handle = {}) {
       const clicked = await clickReply(page, target, log);
       if (!clicked) throw new Error('Не найдена кнопка «Ответить» у комментария');
       await sleep(rand(700, 1500));
-      commentBox = await findFocusedEditable(page);
-      if (!commentBox) commentBox = await findCommentBox(page, 4000);
-      if (!commentBox) throw new Error('Не найдено поле ответа');
+      // Берём ИМЕННО реплай-бокс. НЕ откатываемся на верхний композер — иначе
+      // улетел бы обычный топ-коммент, а не ответ на реплику.
+      commentBox = await waitReplyBox(page, target, 7000);
+      if (!commentBox) throw new Error('Не открылось поле ответа (reply-box) — как ответ коммент не отправлен.');
     } else {
       // ВЕРХНЕУРОВНЕВЫЙ КОММЕНТ: скролл к полю с ранней остановкой.
       log.info('[FB Bot] Ищу поле для комментария...');
