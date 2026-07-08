@@ -59,6 +59,9 @@ const config = {
   // Таймаут подключения Playwright к уже запущенному профилю по CDP. Дефолт
   // Playwright — 30с; под нагрузкой много профилей не успевают, поэтому терпимее.
   cdpConnectTimeoutMs: int(process.env.CDP_CONNECT_TIMEOUT, 60000),
+  // Жёсткий лимит на одну задачу-коммент. Если зависла дольше — прерываем, чтобы
+  // не держать слот очереди (иначе стоят и следующие фейки). По умолчанию 4 мин.
+  taskTimeoutMs: int(process.env.TASK_TIMEOUT, 240000),
   // Блокировать загрузку ТОЛЬКО видео (картинки грузятся). Экономит RAM/CPU/трафик
   // на 10 параллельных профилях. Отключить: BLOCK_VIDEO=false.
   blockVideo: bool(process.env.BLOCK_VIDEO, true),

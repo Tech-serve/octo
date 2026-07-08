@@ -178,8 +178,23 @@ async function runTask(task) {
   });
   taskLog.info(`Старт задачи. Профиль=${task.payload.profileUuid}, пост=${task.payload.postUrl}`);
 
+  // Жёсткий предохранитель от зависаний: если задача идёт дольше лимита — рвём её
+  // (гасим браузер, чтобы in-flight await'ы упали), помечаем ошибкой и освобождаем
+  // слот очереди, чтобы следующие фейки не стояли.
+  let killTimer = null;
+  const timeoutP = new Promise((_, reject) => {
+    killTimer = setTimeout(() => {
+      taskLog.warn(`Задача превысила лимит ${Math.round(config.taskTimeoutMs / 1000)}с — прерываю (зависла).`);
+      try { if (handle.browser) handle.browser.close().catch(() => {}); } catch { /* ignore */ }
+      reject(new Error(`Задача превысила лимит ${Math.round(config.taskTimeoutMs / 1000)}с — прервана (зависла). Проверьте вручную.`));
+    }, config.taskTimeoutMs);
+    if (killTimer.unref) killTimer.unref();
+  });
+
   try {
-    const identity = await leaveFacebookComment(task.payload, taskLog, handle);
+    const work = leaveFacebookComment(task.payload, taskLog, handle);
+    work.catch(() => {}); // проглотить, если таймаут выиграл гонку (не даём unhandledRejection)
+    const identity = await Promise.race([work, timeoutP]);
     // Обновляем белый список реальной FB-идентичностью фейка (id + имя из сессии).
     if (identity && (identity.fbId || identity.fbName)) {
       try { store.upsertWhitelist(task.payload.profileUuid, identity.fbId, identity.fbName); } catch { /* ignore */ }
@@ -217,6 +232,7 @@ async function runTask(task) {
       }
     }
   } finally {
+    if (killTimer) clearTimeout(killTimer);
     store.update(task.id, { logs: taskLog.getLines() });
     taskLog.close();
     if (!handle.canceled) recordDuration(task.id); // отменённые не портят среднее
