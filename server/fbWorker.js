@@ -271,31 +271,12 @@ async function findFocusedEditable(page) {
 // (FB обычно сразу фокусирует ответ), затем — редактируемое поле РЯДОМ с этим же
 // комментарием (реплай-бокс появляется вложенно под ним). НЕ возвращает верхний
 // композер страницы — иначе улетел бы топ-коммент вместо ответа.
-async function waitReplyBox(page, commentEl, timeoutMs) {
+async function waitReplyBox(page, timeoutMs) {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     // eslint-disable-next-line no-await-in-loop
     const focused = await findFocusedEditable(page);
     if (focused) return focused;
-
-    // eslint-disable-next-line no-await-in-loop
-    const near = await commentEl.evaluateHandle((node) => {
-      // Ищем reply-бокс близко к комменту (до 4 уровней вверх) — чтобы не наткнуться
-      // на главный композер страницы, который лежит далеко в дереве.
-      let c = node;
-      for (let up = 0; up < 4 && c; up += 1) {
-        const box = c.querySelector('div[role="textbox"][contenteditable="true"], div[contenteditable="true"]');
-        if (box) return box;
-        c = c.parentElement;
-      }
-      return null;
-    });
-    const el = near.asElement();
-    if (el) {
-      // eslint-disable-next-line no-await-in-loop
-      const box = await el.boundingBox().catch(() => null);
-      if (box && box.height > 0) return el;
-    }
     // eslint-disable-next-line no-await-in-loop
     await sleep(300);
   }
@@ -449,8 +430,8 @@ async function leaveFacebookComment(payload, log, handle = {}) {
       await sleep(rand(700, 1500));
       // Берём ИМЕННО реплай-бокс. НЕ откатываемся на верхний композер — иначе
       // улетел бы обычный топ-коммент, а не ответ на реплику.
-      commentBox = await waitReplyBox(page, target, 7000);
-      if (!commentBox) throw new Error('Не открылось поле ответа (reply-box) — как ответ коммент не отправлен.');
+      commentBox = await waitReplyBox(page, 7000);
+      if (!commentBox) throw new Error('Не открылось поле ответа (reply-box в фокусе) — как ответ коммент не отправлен.');
     } else {
       // ВЕРХНЕУРОВНЕВЫЙ КОММЕНТ: скролл к полю с ранней остановкой.
       log.info('[FB Bot] Ищу поле для комментария...');
@@ -479,17 +460,25 @@ async function leaveFacebookComment(payload, log, handle = {}) {
       }
     }
 
-    // Довести поле в зону видимости и «дочитать» перед кликом.
-    await commentBox.scrollIntoViewIfNeeded();
-    await sleep(rand(500, 1200));
-
     ensureLive();
-    log.info('[FB Bot] Навожу курсор и кликаю по полю...');
-    await humanClick(page, commentBox);
-    await sleep(rand(400, 1000));
-
+    if (replyToText) {
+      // РЕЖИМ ОТВЕТА: reply-бокс уже открыт и в фокусе после «Ответить». Повторный
+      // scrollIntoView/клик в модалке закрывают инлайн-ответ и уводят ввод в
+      // ГЛАВНЫЙ композер → получался топ-коммент. Поэтому просто печатаем в него.
+      log.info('[FB Bot] Печатаю ответ в reply-бокс (без повторного клика)...');
+      await commentBox.focus().catch(() => {});
+      await sleep(rand(300, 700));
+    } else {
+      // Довести поле в зону видимости и «дочитать» перед кликом.
+      await commentBox.scrollIntoViewIfNeeded();
+      await sleep(rand(500, 1200));
+      ensureLive();
+      log.info('[FB Bot] Навожу курсор и кликаю по полю...');
+      await humanClick(page, commentBox);
+      await sleep(rand(400, 1000));
+      log.info('[FB Bot] Печатаю текст как человек...');
+    }
     ensureLive();
-    log.info('[FB Bot] Печатаю текст как человек...');
     await humanType(page, commentText);
 
     // Прикрепить картинку (если задана) — после текста, до отправки.
