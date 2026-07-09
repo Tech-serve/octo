@@ -212,10 +212,15 @@ async function findCommentByText(page, text, timeoutMs) {
     // eslint-disable-next-line no-await-in-loop
     const handle = await page.evaluateHandle((snip) => {
       const n = (s) => (s || '').replace(/\s+/g, ' ');
-      // Сначала — по коммент-контейнерам (article).
+      // Берём САМЫЙ УЗКИЙ article, содержащий фразу (наименьший по тексту) — это
+      // конкретный коммент. Внешний/родительский article содержит текст всех
+      // вложенных ответов, поэтому по «первому совпадению» цеплялся не тот.
+      let best = null; let bestLen = Infinity;
       for (const a of document.querySelectorAll('div[role="article"]')) {
-        if (n(a.textContent).includes(snip)) return a;
+        const txt = n(a.textContent);
+        if (txt.includes(snip) && txt.length < bestLen) { best = a; bestLen = txt.length; }
       }
+      if (best) return best;
       // Запас: любой текстовый узел → поднимаемся к article.
       for (const el of document.querySelectorAll('div[dir="auto"], span')) {
         if (n(el.textContent).includes(snip)) {
