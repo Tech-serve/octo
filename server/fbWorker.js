@@ -201,27 +201,33 @@ async function detectBlock(page) {
   return null;
 }
 
-// Найти комментарий по тексту (для режима ответа). Прокручивает, чтобы
-// подгрузить комментарии. Возвращает ElementHandle контейнера или null.
+// Найти комментарий по тексту (для режима ответа). Ищет контейнер role="article",
+// подгружает комменты («показать ещё» + скролл). Возвращает ElementHandle или null.
 async function findCommentByText(page, text, timeoutMs) {
-  const snippet = String(text).trim().slice(0, 60);
-  const deadline = Date.now() + timeoutMs;
+  const norm = (s) => String(s || '').replace(/\s+/g, ' ').trim();
+  const snippet = norm(text).slice(0, 50);
+  if (snippet.length < 3) return null;
+  const deadline = Date.now() + Math.max(timeoutMs, 22000);
   while (Date.now() < deadline) {
     // eslint-disable-next-line no-await-in-loop
     const handle = await page.evaluateHandle((snip) => {
-      if (!snip) return null;
-      const all = document.querySelectorAll('div, span, li');
-      let leaf = null;
-      for (const el of all) {
-        if (el.childElementCount <= 4 && el.textContent && el.textContent.includes(snip)) { leaf = el; break; }
+      const n = (s) => (s || '').replace(/\s+/g, ' ');
+      // Сначала — по коммент-контейнерам (article).
+      for (const a of document.querySelectorAll('div[role="article"]')) {
+        if (n(a.textContent).includes(snip)) return a;
       }
-      if (!leaf) return null;
-      let c = leaf;
-      for (let up = 0; up < 10 && c; up++) {
-        if (c.getAttribute && c.getAttribute('role') === 'article') return c;
-        c = c.parentElement;
+      // Запас: любой текстовый узел → поднимаемся к article.
+      for (const el of document.querySelectorAll('div[dir="auto"], span')) {
+        if (n(el.textContent).includes(snip)) {
+          let c = el;
+          for (let up = 0; up < 12 && c; up += 1) {
+            if (c.getAttribute && c.getAttribute('role') === 'article') return c;
+            c = c.parentElement;
+          }
+          return el;
+        }
       }
-      return leaf;
+      return null;
     }, snippet);
     const el = handle.asElement();
     if (el) {
@@ -229,10 +235,20 @@ async function findCommentByText(page, text, timeoutMs) {
       const box = await el.boundingBox().catch(() => null);
       if (box && box.height > 0) return el;
     }
+    // Подгрузить ещё комменты: клик по «показать больше комментариев» + скролл.
+    // eslint-disable-next-line no-await-in-loop
+    await page.evaluate(() => {
+      const low = (s) => (s || '').toLowerCase();
+      const roots = ['more comment', 'view more', 'больше комментар', 'ещё комментар', 'еще комментар', 'предыдущие', 'más comentario', 'mais comentário', 'ver más', 'więcej komentarzy'];
+      for (const b of document.querySelectorAll('[role="button"], span, a')) {
+        const t = low(b.innerText || b.textContent);
+        if (t && t.length < 45 && roots.some((r) => t.includes(r))) { b.scrollIntoView({ block: 'center' }); b.click(); return; }
+      }
+    }).catch(() => {});
     // eslint-disable-next-line no-await-in-loop
     await humanScroll(page, { bursts: 1 });
     // eslint-disable-next-line no-await-in-loop
-    await page.waitForTimeout(700);
+    await page.waitForTimeout(800);
   }
   return null;
 }
