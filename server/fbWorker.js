@@ -220,7 +220,15 @@ const ALL_COMMENTS = [
 async function switchToAllComments(page, log) {
   const opened = await page.evaluate((triggers) => {
     const low = (s) => (s || '').trim().toLowerCase();
-    for (const el of document.querySelectorAll('[role="button"], span, div')) {
+    // Триггер сортировки ищем ТОЛЬКО внутри модалки поста, не по всей странице.
+    const root = (() => {
+      for (const d of document.querySelectorAll('div[role="dialog"]')) {
+        const r = d.getBoundingClientRect();
+        if (r.width > 300 && r.height > 300) return d;
+      }
+      return document;
+    })();
+    for (const el of root.querySelectorAll('[role="button"], span, div')) {
       const t = low(el.innerText || el.textContent);
       if (t && t.length < 28 && triggers.some((w) => t === w || t.includes(w))) {
         const r = el.getBoundingClientRect();
@@ -260,17 +268,26 @@ async function findCommentByText(page, text, timeoutMs) {
     // eslint-disable-next-line no-await-in-loop
     const handle = await page.evaluateHandle((snip) => {
       const n = (s) => (s || '').replace(/\s+/g, ' ');
+      // Ищем ТОЛЬКО внутри модалки поста (если открыта), а не по всей странице —
+      // иначе цепляли ленту за модалкой.
+      const root = (() => {
+        for (const d of document.querySelectorAll('div[role="dialog"]')) {
+          const r = d.getBoundingClientRect();
+          if (r.width > 300 && r.height > 300) return d;
+        }
+        return document;
+      })();
       // Берём САМЫЙ УЗКИЙ article, содержащий фразу (наименьший по тексту) — это
       // конкретный коммент. Внешний/родительский article содержит текст всех
       // вложенных ответов, поэтому по «первому совпадению» цеплялся не тот.
       let best = null; let bestLen = Infinity;
-      for (const a of document.querySelectorAll('div[role="article"]')) {
+      for (const a of root.querySelectorAll('div[role="article"]')) {
         const txt = n(a.textContent);
         if (txt.includes(snip) && txt.length < bestLen) { best = a; bestLen = txt.length; }
       }
       if (best) return best;
       // Запас: любой текстовый узел → поднимаемся к article.
-      for (const el of document.querySelectorAll('div[dir="auto"], span')) {
+      for (const el of root.querySelectorAll('div[dir="auto"], span')) {
         if (n(el.textContent).includes(snip)) {
           let c = el;
           for (let up = 0; up < 12 && c; up += 1) {
@@ -292,8 +309,15 @@ async function findCommentByText(page, text, timeoutMs) {
     // eslint-disable-next-line no-await-in-loop
     await page.evaluate(() => {
       const low = (s) => (s || '').toLowerCase();
+      const root = (() => {
+        for (const d of document.querySelectorAll('div[role="dialog"]')) {
+          const r = d.getBoundingClientRect();
+          if (r.width > 300 && r.height > 300) return d;
+        }
+        return document;
+      })();
       const roots = ['more comment', 'view more', 'больше комментар', 'ещё комментар', 'еще комментар', 'предыдущие', 'más comentario', 'mais comentário', 'ver más', 'więcej komentarzy'];
-      for (const b of document.querySelectorAll('[role="button"], span, a')) {
+      for (const b of root.querySelectorAll('[role="button"], span, a')) {
         const t = low(b.innerText || b.textContent);
         if (t && t.length < 45 && roots.some((r) => t.includes(r))) { b.scrollIntoView({ block: 'center' }); b.click(); return; }
       }
