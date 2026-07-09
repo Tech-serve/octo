@@ -502,6 +502,42 @@ function Operation({
   const hasProfiles = profiles.length > 0
   const canCancel = tasks.some((t) => !isTerminal(t.status))
 
+  // Продолжить/повторить прямо в панели результатов операции (не только в Истории).
+  const opDialogState = {}
+  for (const t of tasks) {
+    if (!t.dialogId) continue
+    const d = opDialogState[t.dialogId] || (opDialogState[t.dialogId] = { hasError: false, hasPending: false })
+    if (t.status === 'error') d.hasError = true
+    if (t.status === 'queued' || t.status === 'running') d.hasPending = true
+  }
+  const opResumable = (dialogId) => !!(dialogId && opDialogState[dialogId]
+    && opDialogState[dialogId].hasError && !opDialogState[dialogId].hasPending)
+
+  const opContinueDialog = async (dialogId) => {
+    try {
+      const { data } = await axios.post(`${API_BASE}/api/dialog/continue`, { dialogId })
+      // Влить пересозданные шаги в панель, чтобы поллинг подхватил прогресс.
+      const fresh = (data.created || []).map((t) => ({
+        id: t.id, status: t.status, postUrl: t.postUrl, profileUuid: t.profileUuid,
+        scheduledAt: t.scheduledAt, commentText: t.commentText, imageUrl: t.imageUrl, dialogId: t.dialogId,
+      }))
+      setTasks((prev) => [...prev.filter((t) => t.dialogId !== dialogId || t.status === 'done'), ...fresh])
+    } catch (e) { setError(`Ошибка: ${e.response?.data?.error || e.message}`) }
+  }
+  const opRetryTask = async (id) => {
+    try {
+      const { data } = await axios.post(`${API_BASE}/api/tasks/${id}/retry`)
+      const t = data.task
+      if (t) {
+        const nt = {
+          id: t.id, status: t.status, postUrl: t.postUrl, profileUuid: t.profileUuid,
+          scheduledAt: t.scheduledAt, commentText: t.commentText, imageUrl: t.imageUrl, dialogId: t.dialogId,
+        }
+        setTasks((prev) => [...prev.filter((x) => x.id !== id), nt])
+      }
+    } catch (e) { setError(`Ошибка: ${e.response?.data?.error || e.message}`) }
+  }
+
   // Селект «тег + фейк» с фильтром по строке поиска (общий для режимов 2/3).
   const fakeSelect = (value, tag, searchStr, onTag, onFake) => (
     <>
@@ -847,6 +883,32 @@ function Operation({
             {task.profileUuid && <span className="tm-muted" style={{ fontSize: '11px' }}>Фейк: {profileTitle(task.profileUuid)}</span>}
             {task.commentText && <div style={{ fontSize: '13px' }}>{task.commentText}</div>}
             {task.status === 'error' && task.error && <span className="tm-danger-text" style={{ fontSize: '12px' }}>{task.error}</span>}
+            {task.status === 'error' && task.dialogId && opResumable(task.dialogId) && (
+              <div>
+                <button
+                  type="button"
+                  className="tm-btn tm-btn-outline"
+                  style={{ fontSize: '12px', padding: '2px 10px' }}
+                  title="Пересоздать этот шаг и все последующие реплики диалога и доиграть ветку"
+                  onClick={() => opContinueDialog(task.dialogId)}
+                >
+                  ▶ Продолжить диалог
+                </button>
+              </div>
+            )}
+            {task.status === 'error' && !task.dialogId && (
+              <div>
+                <button
+                  type="button"
+                  className="tm-btn tm-btn-outline"
+                  style={{ fontSize: '12px', padding: '2px 10px' }}
+                  title="Пересоздать эту задачу и выполнить заново"
+                  onClick={() => opRetryTask(task.id)}
+                >
+                  ↻ Повторить ещё раз
+                </button>
+              </div>
+            )}
           </div>
         </div>
       ))}

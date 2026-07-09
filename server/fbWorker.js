@@ -239,16 +239,32 @@ async function switchToAllComments(page, log) {
   }, SORT_TRIGGER).catch(() => false);
   if (!opened) { log.info('[FB Bot] Меню сортировки комментов не найдено — оставляю как есть.'); return false; }
   await sleep(rand(700, 1300));
-  const picked = await page.evaluate((opts) => {
+  // FB-обработчик пункта висит на строке-контейнере, а не на текстовом span —
+  // поэтому .click() по span не срабатывает. Находим заголовок пункта по ТОЧНОМУ
+  // совпадению, поднимаемся к кликабельной строке и жмём реальной мышью по её центру.
+  const coords = await page.evaluate((opts) => {
     const low = (s) => (s || '').trim().toLowerCase();
-    const items = document.querySelectorAll('[role="menuitem"], [role="menuitemradio"], [role="menu"] [role="button"], [role="menu"] span, [role="dialog"] [role="button"]');
-    for (const it of items) {
-      const t = low(it.innerText || it.textContent);
-      if (t && t.length < 40 && opts.some((w) => t.includes(w))) { it.click(); return true; }
+    let titleEl = null;
+    for (const el of document.querySelectorAll('[role="menu"] span, [role="menu"] div, [role="menuitem"], span, div')) {
+      const t = low(el.innerText || el.textContent);
+      if (t && opts.includes(t)) {
+        const r = el.getBoundingClientRect();
+        if (r.width > 0 && r.height > 0) { titleEl = el; break; }
+      }
     }
-    return false;
-  }, ALL_COMMENTS).catch(() => false);
-  if (picked) {
+    if (!titleEl) return null;
+    let row = titleEl;
+    for (let up = 0; up < 6 && row.parentElement; up += 1) {
+      const role = row.getAttribute && row.getAttribute('role');
+      if (role === 'menuitem' || role === 'menuitemradio' || role === 'button') break;
+      row = row.parentElement;
+    }
+    row.scrollIntoView({ block: 'center' });
+    const r = row.getBoundingClientRect();
+    return { x: r.left + Math.min(r.width / 2, 90), y: r.top + r.height / 2 };
+  }, ALL_COMMENTS).catch(() => null);
+  if (coords) {
+    await page.mouse.click(coords.x, coords.y).catch(() => {});
     log.info('[FB Bot] Сортировка комментов → «Все комментарии».');
     await sleep(rand(1500, 2500));
     return true;
