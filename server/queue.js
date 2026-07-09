@@ -258,8 +258,10 @@ async function runTask(task) {
       taskLog.error(`Задача завершилась с ошибкой: ${err.message}`);
       // Помечаем фейк с ТОЧНЫМ статусом: если воркер определил (бан/проверка/…) —
       // берём его, иначе по тексту ошибки считаем checkpoint.
-      const st = err.accountStatus
+      let st = err.accountStatus
         || (/checkpoint|проверк|заблокир|verif/i.test(err.message) ? 'checkpoint' : null);
+      // Дохлый прокси у фейка → ⚠️ прокси (снимется при успешном комменте).
+      if (!st && /err_socks|err_proxy|err_tunnel|proxy data/i.test(err.message)) st = 'proxy';
       if (st) {
         try { store.flagProfile(task.payload.profileUuid, st); } catch { /* ignore */ }
       }
