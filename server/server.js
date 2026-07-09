@@ -477,6 +477,33 @@ app.post('/api/dialog/continue', ownerMiddleware, (req, res) => {
   res.json({ ok: true, created });
 });
 
+// Повторить одиночную упавшую задачу (режимы 1/2) — пересоздаём с тем же
+// содержимым. Для диалогов используется «Продолжить» (см. выше).
+app.post('/api/tasks/:id/retry', ownerMiddleware, (req, res) => {
+  const old = store.get(req.params.id);
+  if (!old) return res.status(404).json({ error: 'Задача не найдена' });
+  if (config.authEnabled && old.owner !== req.owner) {
+    return res.status(404).json({ error: 'Задача не найдена' });
+  }
+  if (old.dialogId) {
+    return res.status(400).json({ error: 'Для диалога используйте «Продолжить»' });
+  }
+  const now = Date.now();
+  const task = store.createTask(
+    {
+      profileUuid: old.payload.profileUuid,
+      postUrl: old.payload.postUrl,
+      commentText: old.payload.commentText,
+      baseText: old.payload.baseText,
+      imagePath: old.payload.imagePath,
+      replyToText: old.payload.replyToText,
+    },
+    { scheduledAt: queue.earliestSlot(old.payload.profileUuid, now, now), owner: old.owner },
+  );
+  queue.enqueue(task);
+  res.json({ ok: true, task: store.toPublic(task) });
+});
+
 // Статус конкретной задачи (для поллинга с фронта). Только своя задача.
 app.get('/api/tasks/:id', ownerMiddleware, (req, res) => {
   const task = store.get(req.params.id);

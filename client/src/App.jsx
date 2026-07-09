@@ -114,7 +114,7 @@ function varyImage(dataUrl) {
       // Ограничиваем итоговый размер: большие фото давали тяжёлый base64, и
       // туннель рвал загрузку запроса ("request aborted"/502). Ужимаем длинную
       // сторону до MAX_DIM — картинка лёгкая, грузится надёжно, визуально та же.
-      const MAX_DIM = 1080
+      const MAX_DIM = 960
       const fit = Math.min(1, MAX_DIM / Math.max(sw, sh))
       const scale = rnd(0.9, 1.0) * fit
       const dw = Math.max(8, Math.round(sw * scale))
@@ -128,11 +128,28 @@ function varyImage(dataUrl) {
         + `saturate(${rnd(0.92, 1.08).toFixed(3)}) `
         + `hue-rotate(${rnd(-4, 4).toFixed(1)}deg)`
       ctx.drawImage(img, cl, ct, sw, sh, 0, 0, dw, dh)
-      resolve(canvas.toDataURL('image/jpeg', rnd(0.7, 0.76)))
+      resolve(canvas.toDataURL('image/jpeg', rnd(0.66, 0.72)))
     }
     img.onerror = () => resolve(dataUrl)
     img.src = dataUrl
   })
+}
+
+// POST задачи с ретраем: туннель Cloudflare иногда дропает тело запроса с
+// картинкой (502/«request aborted»). Повторяем на 502/503/504/сетевой сбой.
+async function postTasks(payload, tries = 3) {
+  let lastErr
+  for (let i = 0; i < tries; i += 1) {
+    try {
+      return await axios.post(`${API_BASE}/api/tasks`, payload)
+    } catch (e) {
+      lastErr = e
+      const code = e.response && e.response.status
+      if (code && ![502, 503, 504].includes(code)) throw e
+      await new Promise((r) => { setTimeout(r, 800 + i * 800) })
+    }
+  }
+  throw lastErr
 }
 
 // Иконка обновления.
@@ -354,7 +371,7 @@ function Operation({
           image: s.image ? await varyImage(s.image) : null,
         }))),
       })))
-      const { data } = await axios.post(`${API_BASE}/api/tasks`, { postUrl: url, dialogs: payloadDialogs })
+      const { data } = await postTasks({ postUrl: url, dialogs: payloadDialogs })
       setTasks((data.tasks || []).map((t) => ({
         id: t.taskId,
         status: t.status,
@@ -390,7 +407,7 @@ function Operation({
       for (let i = 0; i < list.length; i += 1) {
         const e = list[i]
         const image = e.image ? await varyImage(e.image) : null
-        const { data } = await axios.post(`${API_BASE}/api/tasks`, {
+        const { data } = await postTasks({
           postUrl: url,
           entries: [{ profileUuid: e.profileUuid, commentText: e.comment, image }],
           staggerIndex: i,
@@ -439,13 +456,13 @@ function Operation({
         // и чтобы у каждого поста ушёл свой текст.
         for (const it of filled) {
           const image = opImage ? await varyImage(opImage) : null
-          const { data } = await axios.post(`${API_BASE}/api/tasks`, {
+          const { data } = await postTasks({
             profileUuid, posts: [{ url: it.url, image }], commentText: commentFor(it.i),
           })
           collected = collected.concat(data.tasks || [])
         }
       } else {
-        const { data } = await axios.post(`${API_BASE}/api/tasks`, {
+        const { data } = await postTasks({
           profileUuid,
           posts: filled.map((it) => ({ url: it.url, image: null })),
           commentText,
@@ -889,6 +906,9 @@ function History({ profiles }) {
   const continueDialog = async (dialogId) => {
     try { await axios.post(`${API_BASE}/api/dialog/continue`, { dialogId }) } catch { /* пропустим */ }
   }
+  const retryTask = async (id) => {
+    try { await axios.post(`${API_BASE}/api/tasks/${id}/retry`) } catch { /* пропустим */ }
+  }
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
@@ -908,7 +928,7 @@ function History({ profiles }) {
             <div className="tm-muted">Фейк: {nameOf(t.profileUuid)} · {timeInfo(t)}</div>
             {t.commentText && <div style={{ fontSize: '13px' }}>{t.commentText}</div>}
             {t.status === 'error' && t.error && <div className="tm-danger-text" style={{ fontSize: '12px' }}>{t.error}</div>}
-            {t.status === 'error' && resumable(t.dialogId) && (
+            {t.status === 'error' && t.dialogId && resumable(t.dialogId) && (
               <div>
                 <button
                   type="button"
@@ -918,6 +938,19 @@ function History({ profiles }) {
                   onClick={() => continueDialog(t.dialogId)}
                 >
                   ▶ Продолжить диалог
+                </button>
+              </div>
+            )}
+            {t.status === 'error' && !t.dialogId && (
+              <div>
+                <button
+                  type="button"
+                  className="tm-btn tm-btn-outline"
+                  style={{ fontSize: '12px', padding: '2px 10px' }}
+                  title="Пересоздать эту задачу и выполнить заново"
+                  onClick={() => retryTask(t.id)}
+                >
+                  ↻ Повторить ещё раз
                 </button>
               </div>
             )}
