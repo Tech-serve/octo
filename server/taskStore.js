@@ -108,10 +108,11 @@ const insertStmt = db.prepare(`
   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 `);
 const countSameStmt = db.prepare(
-  'SELECT COUNT(*) AS n FROM tasks WHERE profile_uuid = ? AND base_text = ?',
+  "SELECT COUNT(*) AS n FROM tasks WHERE profile_uuid = ? AND base_text = ? AND status = 'done'",
 );
 
-// Сколько постов с таким же базовым текстом уже есть у профиля (для лимита).
+// Сколько ОПУБЛИКОВАННЫХ (status=done) постов с таким же базовым текстом уже есть
+// у профиля — для лимита. Упавшие/отменённые не считаем: они не опубликовались.
 function countSameForProfile(profileUuid, baseText) {
   return countSameStmt.get(profileUuid, baseText).n;
 }
