@@ -316,10 +316,23 @@ async function findCommentByText(page, text, timeoutMs) {
         }
         return document;
       })();
-      const roots = ['more comment', 'view more', 'больше комментар', 'ещё комментар', 'еще комментар', 'предыдущие', 'más comentario', 'mais comentário', 'ver más', 'więcej komentarzy'];
+      // «Показать ещё комментарии» — мультиязычно.
+      const moreComments = [
+        'more comment', 'view more', 'previous comment', 'view previous',
+        'больше комментар', 'ещё комментар', 'еще комментар', 'предыдущие коммент',
+        'переглянути ще', 'більше комент', 'ще комент', 'попередні комент',
+        'más comentario', 'ver más comentario', 'mais comentário', 'comentários anteriores', 'ver mais',
+        'weitere kommentar', 'mehr kommentar', 'plus de commentaire', 'commentaires précédents',
+        'altri commenti', 'więcej komentarzy', 'meer reacties', 'daha fazla yorum', 'önceki yorum',
+      ];
+      // Развернуть свёрнутые ответы: слово-ответ + ЦИФРА (чтобы не нажать «Ответить»).
+      const replyWords = ['repl', 'відповід', 'ответ', 'respuesta', 'resposta', 'antwort', 'réponse', 'rispost', 'odpowied', 'yanıt', 'reactie'];
       for (const b of root.querySelectorAll('[role="button"], span, a')) {
         const t = low(b.innerText || b.textContent);
-        if (t && t.length < 45 && roots.some((r) => t.includes(r))) { b.scrollIntoView({ block: 'center' }); b.click(); return; }
+        if (!t || t.length > 45) continue;
+        const isMore = moreComments.some((r) => t.includes(r));
+        const isRepl = /\d/.test(t) && replyWords.some((r) => t.includes(r));
+        if (isMore || isRepl) { b.scrollIntoView({ block: 'center' }); b.click(); return; }
       }
     }).catch(() => {});
     // eslint-disable-next-line no-await-in-loop
