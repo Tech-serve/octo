@@ -165,6 +165,16 @@ function drain() {
   }
 }
 
+// Транзиентная ли ошибка (стоит повторить). НЕ повторяем «не подтверждён» (коммент
+// мог реально запоститься → дубль) и таймаут задачи. Повторяем обрывы сессии,
+// навигацию и неудачи открытия reply-бокса/поиска коммента (они не запостили).
+function isRetryable(msg) {
+  if (!msg) return false;
+  if (/не подтверждён|придержал/i.test(msg)) return false;
+  if (/превысила лимит/i.test(msg)) return false;
+  return /closed|target page|context or browser|econnreset|socket hang up|timeout \d+ms exceeded|page\.goto|err_|не найден комментарий для ответа|не открылось поле ответа|не найдена кнопка|already started|octo отказал|ws_endpoint/i.test(msg);
+}
+
 async function runTask(task) {
   active++;
   runningProfiles.add(task.payload.profileUuid);
@@ -192,9 +202,32 @@ async function runTask(task) {
   });
 
   try {
-    const work = leaveFacebookComment(task.payload, taskLog, handle);
-    work.catch(() => {}); // проглотить, если таймаут выиграл гонку (не даём unhandledRejection)
-    const identity = await Promise.race([work, timeoutP]);
+    let identity = null;
+    let lastErr = null;
+    const maxAttempts = 1 + Math.max(0, config.taskRetries);
+    for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+      try {
+        const work = leaveFacebookComment(task.payload, taskLog, handle);
+        work.catch(() => {}); // проглотить, если таймаут выиграл гонку
+        // eslint-disable-next-line no-await-in-loop
+        identity = await Promise.race([work, timeoutP]);
+        lastErr = null;
+        break;
+      } catch (err) {
+        lastErr = err;
+        // Не ретраим: отмена, бан/чекпоинт, «не подтверждён» (мог запоститься),
+        // таймаут задачи — только транзиентные (обрыв/навигация/reply-setup).
+        if (handle.canceled || err.accountStatus || !isRetryable(err.message)) break;
+        if (attempt < maxAttempts) {
+          taskLog.warn(`Попытка ${attempt}/${maxAttempts} не удалась: ${err.message}. Повтор...`);
+          handle.browser = null;
+          // eslint-disable-next-line no-await-in-loop
+          await new Promise((r) => setTimeout(r, 2500 + Math.round(Math.random() * 2500)));
+        }
+      }
+    }
+    if (lastErr) throw lastErr;
+
     // Обновляем белый список реальной FB-идентичностью фейка (id + имя из сессии).
     if (identity && (identity.fbId || identity.fbName)) {
       try { store.upsertWhitelist(task.payload.profileUuid, identity.fbId, identity.fbName); } catch { /* ignore */ }

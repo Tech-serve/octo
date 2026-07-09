@@ -473,10 +473,17 @@ async function verifyCommentPosted(page, text, log, timeoutMs = 16000) {
     // eslint-disable-next-line no-await-in-loop
     const found = await page.evaluate((snip) => {
       const clean2 = (s) => String(s || '').toLowerCase().replace(/\s+/g, ' ').replace(/[^\p{L}\p{N} ]+/gu, '').trim();
+      // Ищем внутри модалки поста (если открыта), не по всей странице.
+      const root = (() => {
+        for (const d of document.querySelectorAll('div[role="dialog"]')) {
+          const r = d.getBoundingClientRect();
+          if (r.width > 300 && r.height > 300) return d;
+        }
+        return document;
+      })();
       // Только внутри комментов (article), НЕ в поле ввода — иначе оставшийся
       // черновик дал бы ложное «подтверждено».
-      const arts = document.querySelectorAll('div[role="article"]');
-      for (const n of arts) {
+      for (const n of root.querySelectorAll('div[role="article"]')) {
         if (clean2(n.textContent || '').includes(snip)) return true;
       }
       return false;
@@ -653,21 +660,16 @@ async function leaveFacebookComment(payload, log, handle = {}) {
       fieldCleared = true; // поле пропало из DOM
     }
 
-    if (replyToText) {
-      // Режим 3 (ответ в дереве): проверку публикации НЕ делаем — ответы вложены
-      // и ищутся иначе; оставляем поведение как было (по очистке поля).
-      if (fieldCleared) log.info(`[FB Bot] Ответ отправлен, поле очистилось. Профиль ${profileUuid}`);
-      else log.warn('[FB Bot] Текст ответа всё ещё в поле — проверьте вручную');
-    } else {
-      // ЧЕСТНАЯ ПРОВЕРКА (только верхнеуровневые комменты, режимы 1/2): реально
-      // ищем наш текст среди комментов. Не нашли — FB придержал/не опубликовал.
-      log.info('[FB Bot] Проверяю, появился ли коммент на посте...');
-      const confirmed = await verifyCommentPosted(page, commentText, log);
-      if (!confirmed) {
-        throw new Error('Коммент не подтверждён: не найден на посте (вероятно, FB придержал как спам). Проверьте вручную.');
-      }
-      log.info(`[FB Bot] Коммент подтверждён на посте${fieldCleared ? '' : ' (поле не очистилось, но текст есть)'}. Профиль ${profileUuid}`);
+    // ЧЕСТНАЯ ПРОВЕРКА публикации — и для топ-комментов (реж.1/2), и для ОТВЕТОВ
+    // (реж.3). Реально ищем наш текст среди комментов на посте (в модалке, с
+    // очисткой от эмодзи). Не нашли — FB придержал/не опубликовал.
+    const kind = replyToText ? 'Ответ' : 'Коммент';
+    log.info(`[FB Bot] Проверяю, появился ли ${replyToText ? 'ответ' : 'коммент'} на посте...`);
+    const confirmed = await verifyCommentPosted(page, commentText, log);
+    if (!confirmed) {
+      throw new Error(`${kind} не подтверждён: не найден на посте (вероятно, FB придержал как спам). Проверьте вручную.`);
     }
+    log.info(`[FB Bot] ${kind} подтверждён на посте${fieldCleared ? '' : ' (поле не очистилось, но текст есть)'}. Профиль ${profileUuid}`);
 
     // Захват реальной FB-идентичности (id из c_user, имя из страницы) — для
     // белого списка. Сессия сейчас гарантированно валидна и на FB-странице.

@@ -875,6 +875,21 @@ function History({ profiles }) {
 
   const sorted = [...tasks].sort((a, b) => (b.scheduledAt || 0) - (a.scheduledAt || 0))
 
+  // Оборванный диалог = есть упавший шаг И нет активных (queued/running) — можно
+  // продолжить. Считаем состояние по dialogId.
+  const dialogState = {}
+  for (const t of tasks) {
+    if (!t.dialogId) continue
+    const d = dialogState[t.dialogId] || (dialogState[t.dialogId] = { hasError: false, hasPending: false })
+    if (t.status === 'error') d.hasError = true
+    if (t.status === 'queued' || t.status === 'running') d.hasPending = true
+  }
+  const resumable = (dialogId) => !!(dialogId && dialogState[dialogId] && dialogState[dialogId].hasError && !dialogState[dialogId].hasPending)
+
+  const continueDialog = async (dialogId) => {
+    try { await axios.post(`${API_BASE}/api/dialog/continue`, { dialogId }) } catch { /* пропустим */ }
+  }
+
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
       {sorted.length === 0 && <div className="tm-muted">Пока нет задач.</div>}
@@ -893,6 +908,19 @@ function History({ profiles }) {
             <div className="tm-muted">Фейк: {nameOf(t.profileUuid)} · {timeInfo(t)}</div>
             {t.commentText && <div style={{ fontSize: '13px' }}>{t.commentText}</div>}
             {t.status === 'error' && t.error && <div className="tm-danger-text" style={{ fontSize: '12px' }}>{t.error}</div>}
+            {t.status === 'error' && resumable(t.dialogId) && (
+              <div>
+                <button
+                  type="button"
+                  className="tm-btn tm-btn-outline"
+                  style={{ fontSize: '12px', padding: '2px 10px' }}
+                  title="Пересоздать этот шаг и все последующие реплики диалога и доиграть ветку"
+                  onClick={() => continueDialog(t.dialogId)}
+                >
+                  ▶ Продолжить диалог
+                </button>
+              </div>
+            )}
           </div>
         </div>
       ))}

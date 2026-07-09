@@ -121,6 +121,17 @@ const updateStmt = db.prepare(`
 `);
 const listStmt = db.prepare('SELECT * FROM tasks ORDER BY created_at DESC');
 const listByOwnerStmt = db.prepare('SELECT * FROM tasks WHERE owner = ? ORDER BY created_at DESC');
+const listByDialogStmt = db.prepare('SELECT * FROM tasks WHERE dialog_id = ? ORDER BY step_order ASC');
+const deleteByIdStmt = db.prepare('DELETE FROM tasks WHERE id = ?');
+
+// Все шаги диалога по порядку (для «Продолжить»).
+function listByDialog(dialogId) {
+  return listByDialogStmt.all(dialogId).map(rowToTask);
+}
+// Удалить задачу по id (старые упавшие/отменённые шаги при возобновлении).
+function deleteTask(id) {
+  deleteByIdStmt.run(id);
+}
 
 function createTask(payload, opts = {}) {
   const id = crypto.randomUUID();
@@ -281,4 +292,5 @@ module.exports = {
   STATUS, createTask, update, get, toPublic, list, loadPending, countSameForProfile, pruneOld,
   flagProfile, clearProfileFlag, listFlags,
   upsertWhitelist, getWhitelist, listWhitelist,
+  listByDialog, deleteTask,
 };

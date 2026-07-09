@@ -420,6 +420,63 @@ app.post('/api/whitelist/cancel', ownerMiddleware, (req, res) => {
   res.json({ canceled: whitelistJob.cancel() });
 });
 
+// Продолжить оборвавшийся диалог (режим 3): пересоздать упавший шаг и все
+// последующие, сохранив порядок, текст ответа (replyToText) и картинки. Ранние
+// DONE-шаги остаются; цепочка зависимостей строится заново от них.
+app.post('/api/dialog/continue', ownerMiddleware, (req, res) => {
+  const dialogId = req.body && req.body.dialogId;
+  if (!dialogId) return res.status(400).json({ error: 'dialogId обязателен' });
+  const steps = store.listByDialog(dialogId);
+  if (!steps.length) return res.status(404).json({ error: 'Диалог не найден' });
+  if (config.authEnabled && steps[0].owner !== req.owner) {
+    return res.status(404).json({ error: 'Диалог не найден' });
+  }
+
+  const DONE = store.STATUS.DONE;
+  const resumeIdx = steps.findIndex((t) => t.status !== DONE);
+  if (resumeIdx < 0) return res.status(400).json({ error: 'Все шаги диалога уже выполнены' });
+  for (let i = 0; i < resumeIdx; i += 1) {
+    if (steps[i].status !== DONE) {
+      return res.status(400).json({ error: 'Ранние шаги диалога не завершены.' });
+    }
+  }
+
+  const reqNow = Date.now();
+  const gapMin = config.mode3GapMinMs;
+  const gapMax = Math.max(config.mode3GapMaxMs, gapMin);
+  let prevId = resumeIdx > 0 ? steps[resumeIdx - 1].id : null;
+  let cursor = queue.earliestSlot(steps[resumeIdx].payload.profileUuid, reqNow, reqNow);
+
+  // Старые упавшие/отменённые шаги удаляем — пересоздаём заново.
+  for (let i = resumeIdx; i < steps.length; i += 1) {
+    try { store.deleteTask(steps[i].id); } catch { /* ignore */ }
+  }
+
+  const created = [];
+  for (let i = resumeIdx; i < steps.length; i += 1) {
+    const s = steps[i];
+    const scheduledAt = cursor;
+    cursor += Math.round(gapMin + Math.random() * (gapMax - gapMin));
+    const task = store.createTask(
+      {
+        profileUuid: s.payload.profileUuid,
+        postUrl: s.payload.postUrl,
+        commentText: s.payload.commentText,
+        baseText: s.payload.baseText,
+        imagePath: s.payload.imagePath,
+        replyToText: s.payload.replyToText,
+      },
+      {
+        scheduledAt, dialogId, stepOrder: s.stepOrder, dependsOn: prevId, owner: s.owner,
+      },
+    );
+    queue.enqueue(task);
+    prevId = task.id;
+    created.push(store.toPublic(task));
+  }
+  res.json({ ok: true, created });
+});
+
 // Статус конкретной задачи (для поллинга с фронта). Только своя задача.
 app.get('/api/tasks/:id', ownerMiddleware, (req, res) => {
   const task = store.get(req.params.id);
