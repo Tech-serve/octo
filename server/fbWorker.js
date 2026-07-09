@@ -269,7 +269,14 @@ async function clickReply(page, commentEl, log) {
   const b = btn.asElement();
   if (!b) return false;
   log.info('[FB Bot] Нажимаю «Ответить»...');
-  await humanClick(page, b);
+  // Playwright-клик (сам скроллит в зону видимости и жмёт по центру) — надёжнее
+  // клика по вычисленным координатам, который мог промахнуться и не открыть бокс.
+  try {
+    await b.scrollIntoViewIfNeeded().catch(() => {});
+    await b.click({ timeout: 6000 });
+  } catch {
+    try { await humanClick(page, b); } catch { return false; }
+  }
   return true;
 }
 
@@ -296,7 +303,7 @@ async function findNewEditable(page, timeoutMs) {
   while (Date.now() < deadline) {
     // eslint-disable-next-line no-await-in-loop
     const h = await page.evaluateHandle(() => {
-      const els = document.querySelectorAll('div[contenteditable="true"], div[role="textbox"][contenteditable="true"]');
+      const els = document.querySelectorAll('[contenteditable="true"], [role="textbox"]');
       for (const el of els) {
         if (el.hasAttribute('data-pre-reply')) continue;
         const r = el.getBoundingClientRect();
@@ -457,14 +464,14 @@ async function leaveFacebookComment(payload, log, handle = {}) {
       // Метим существующие редактируемые поля — чтобы после «Ответить» отличить
       // НОВОЕ (reply-бокс) от главного композера.
       await page.evaluate(() => {
-        document.querySelectorAll('div[contenteditable="true"], div[role="textbox"]')
+        document.querySelectorAll('[contenteditable="true"], [role="textbox"]')
           .forEach((el) => el.setAttribute('data-pre-reply', '1'));
       }).catch(() => {});
       const clicked = await clickReply(page, target, log);
       if (!clicked) throw new Error('Не найдена кнопка «Ответить» у комментария');
-      await sleep(rand(700, 1500));
+      await sleep(rand(1000, 1800));
       // Берём ИМЕННО новый reply-бокс (не главный композер).
-      commentBox = await findNewEditable(page, 8000);
+      commentBox = await findNewEditable(page, 10000);
       if (!commentBox) throw new Error('Не открылось поле ответа (reply-box) — как ответ коммент не отправлен.');
     } else {
       // ВЕРХНЕУРОВНЕВЫЙ КОММЕНТ: скролл к полю с ранней остановкой.
