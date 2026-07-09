@@ -201,6 +201,54 @@ async function detectBlock(page) {
   return null;
 }
 
+// Подпись текущей сортировки комментов (её кликаем, чтобы открыть меню) и пункт
+// «Все комментарии» — мультиязычно. По умолчанию FB ставит «Самые актуальные»,
+// и свежий родительский коммент туда может не попасть.
+const SORT_TRIGGER = [
+  'самые актуальные', 'найрелевантніші', 'актуальні коментарі', 'most relevant',
+  'más relevantes', 'mais relevantes', 'relevantesten', 'plus pertinents',
+  'più rilevanti', 'najtrafniejsze', 'en alakalı', 'все комментарии', 'all comments',
+];
+const ALL_COMMENTS = [
+  'все комментарии', 'усі коментарі', 'all comments', 'todos los comentarios',
+  'todos os comentários', 'alle kommentare', 'tous les commentaires', 'tutti i commenti',
+  'wszystkie komentarze', 'tüm yorumlar',
+];
+
+// Переключить сортировку комментов на «Все комментарии», чтобы видеть все (в т.ч.
+// только что оставленную родительскую реплику). Тихо пропускаем, если не нашли.
+async function switchToAllComments(page, log) {
+  const opened = await page.evaluate((triggers) => {
+    const low = (s) => (s || '').trim().toLowerCase();
+    for (const el of document.querySelectorAll('[role="button"], span, div')) {
+      const t = low(el.innerText || el.textContent);
+      if (t && t.length < 28 && triggers.some((w) => t === w || t.includes(w))) {
+        const r = el.getBoundingClientRect();
+        if (r.width > 0 && r.height > 0) { el.scrollIntoView({ block: 'center' }); el.click(); return true; }
+      }
+    }
+    return false;
+  }, SORT_TRIGGER).catch(() => false);
+  if (!opened) { log.info('[FB Bot] Меню сортировки комментов не найдено — оставляю как есть.'); return false; }
+  await sleep(rand(700, 1300));
+  const picked = await page.evaluate((opts) => {
+    const low = (s) => (s || '').trim().toLowerCase();
+    const items = document.querySelectorAll('[role="menuitem"], [role="menuitemradio"], [role="menu"] [role="button"], [role="menu"] span, [role="dialog"] [role="button"]');
+    for (const it of items) {
+      const t = low(it.innerText || it.textContent);
+      if (t && t.length < 40 && opts.some((w) => t.includes(w))) { it.click(); return true; }
+    }
+    return false;
+  }, ALL_COMMENTS).catch(() => false);
+  if (picked) {
+    log.info('[FB Bot] Сортировка комментов → «Все комментарии».');
+    await sleep(rand(1500, 2500));
+    return true;
+  }
+  await page.keyboard.press('Escape').catch(() => {});
+  return false;
+}
+
 // Найти комментарий по тексту (для режима ответа). Ищет контейнер role="article",
 // подгружает комменты («показать ещё» + скролл). Возвращает ElementHandle или null.
 async function findCommentByText(page, text, timeoutMs) {
@@ -461,6 +509,9 @@ async function leaveFacebookComment(payload, log, handle = {}) {
     if (replyToText) {
       // РЕЖИМ ОТВЕТА: найти нужный комментарий, нажать «Ответить», взять поле.
       log.info(`[FB Bot] Режим ответа. Ищу комментарий: "${replyToText.slice(0, 40)}…"`);
+      // Включаем «Все комментарии», иначе свежая родительская реплика может не
+      // показаться в «Самые актуальные».
+      await switchToAllComments(page, log);
       const target = await findCommentByText(page, replyToText, config.selectorTimeout);
       if (!target) throw new Error(`Не найден комментарий для ответа: "${replyToText.slice(0, 40)}…"`);
       await target.scrollIntoViewIfNeeded().catch(() => {});
