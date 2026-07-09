@@ -548,11 +548,22 @@ function cleanupOld() {
 // dist нет — этот блок пропускается.
 const clientDist = path.resolve(__dirname, '..', 'client', 'dist');
 if (fs.existsSync(clientDist)) {
-  app.use(express.static(clientDist));
-  // SPA-fallback: любой GET не под /api и /uploads отдаёт index.html.
+  // index.html НЕ кешируем (иначе браузер/туннель/iframe держат старый бандл после
+  // деплоя). Хешированные ассеты (index-<hash>.js/.css) неизменяемы — кешируем навсегда.
+  app.use(express.static(clientDist, {
+    setHeaders: (res, filePath) => {
+      if (filePath.endsWith('index.html')) {
+        res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+      } else {
+        res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
+      }
+    },
+  }));
+  // SPA-fallback: любой GET не под /api и /uploads отдаёт index.html (тоже без кеша).
   app.use((req, res, next) => {
     if (req.method !== 'GET') return next();
     if (req.path.startsWith('/api') || req.path.startsWith('/uploads')) return next();
+    res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
     return res.sendFile(path.join(clientDist, 'index.html'));
   });
   logger.info('Фронт отдаётся из client/dist (один origin с API)', 'boot');

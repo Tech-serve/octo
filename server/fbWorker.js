@@ -215,12 +215,37 @@ const ALL_COMMENTS = [
   'wszystkie komentarze', 'tüm yorumlar',
 ];
 
+// FB автоплеит видео в посте (нередко со звуком) при открытии — мьютим и ставим
+// на паузу. Повторяем несколько раз: плеер может перезапуститься после догрузки.
+async function silenceVideos(page, log, rounds = 3) {
+  let paused = 0;
+  for (let i = 0; i < rounds; i += 1) {
+    // eslint-disable-next-line no-await-in-loop
+    const n = await page.evaluate(() => {
+      let count = 0;
+      for (const v of document.querySelectorAll('video')) {
+        try {
+          v.muted = true; v.volume = 0; v.autoplay = false;
+          v.removeAttribute('autoplay');
+          if (!v.paused) { v.pause(); count += 1; }
+        } catch { /* ignore */ }
+      }
+      return count;
+    }).catch(() => 0);
+    paused += n;
+    // eslint-disable-next-line no-await-in-loop
+    if (i < rounds - 1) await sleep(500);
+  }
+  if (paused > 0) log.info(`[FB Bot] Видео в посте заглушено/остановлено (${paused}).`);
+}
+
 // Переключить сортировку комментов на «Все комментарии», чтобы видеть все (в т.ч.
 // только что оставленную родительскую реплику). Тихо пропускаем, если не нашли.
 async function switchToAllComments(page, log) {
-  const opened = await page.evaluate((triggers) => {
+  // 1) Триггер сортировки («Самые актуальные ▾») ищем ТОЛЬКО в модалке поста и
+  // жмём РЕАЛЬНОЙ мышью — DOM .click() по внутреннему span у FB не открывает меню.
+  const trigCoords = await page.evaluate((triggers) => {
     const low = (s) => (s || '').trim().toLowerCase();
-    // Триггер сортировки ищем ТОЛЬКО внутри модалки поста, не по всей странице.
     const root = (() => {
       for (const d of document.querySelectorAll('div[role="dialog"]')) {
         const r = d.getBoundingClientRect();
@@ -228,47 +253,67 @@ async function switchToAllComments(page, log) {
       }
       return document;
     })();
+    let hit = null;
     for (const el of root.querySelectorAll('[role="button"], span, div')) {
       const t = low(el.innerText || el.textContent);
-      if (t && t.length < 28 && triggers.some((w) => t === w || t.includes(w))) {
+      // Короткий текст, начинающийся с подписи сортировки (без описаний-тултипов).
+      if (t && t.length < 26 && triggers.some((w) => t === w || t.startsWith(w))) {
         const r = el.getBoundingClientRect();
-        if (r.width > 0 && r.height > 0) { el.scrollIntoView({ block: 'center' }); el.click(); return true; }
+        if (r.width > 0 && r.height > 0) { hit = el; break; }
       }
     }
-    return false;
-  }, SORT_TRIGGER).catch(() => false);
-  if (!opened) { log.info('[FB Bot] Меню сортировки комментов не найдено — оставляю как есть.'); return false; }
-  await sleep(rand(700, 1300));
-  // FB-обработчик пункта висит на строке-контейнере, а не на текстовом span —
-  // поэтому .click() по span не срабатывает. Находим заголовок пункта по ТОЧНОМУ
-  // совпадению, поднимаемся к кликабельной строке и жмём реальной мышью по её центру.
-  const coords = await page.evaluate((opts) => {
-    const low = (s) => (s || '').trim().toLowerCase();
-    let titleEl = null;
-    for (const el of document.querySelectorAll('[role="menu"] span, [role="menu"] div, [role="menuitem"], span, div')) {
-      const t = low(el.innerText || el.textContent);
-      if (t && opts.includes(t)) {
-        const r = el.getBoundingClientRect();
-        if (r.width > 0 && r.height > 0) { titleEl = el; break; }
+    if (!hit) return null;
+    let btn = hit;
+    for (let up = 0; up < 6 && btn.parentElement; up += 1) {
+      if (btn.getAttribute && btn.getAttribute('role') === 'button') break;
+      btn = btn.parentElement;
+    }
+    (btn || hit).scrollIntoView({ block: 'center' });
+    const r = (btn || hit).getBoundingClientRect();
+    return { x: r.left + r.width / 2, y: r.top + r.height / 2 };
+  }, SORT_TRIGGER).catch(() => null);
+  if (!trigCoords) { log.info('[FB Bot] Триггер сортировки комментов не найден — оставляю как есть.'); return false; }
+  await page.mouse.click(trigCoords.x, trigCoords.y).catch(() => {});
+  log.info('[FB Bot] Открываю меню сортировки комментов…');
+
+  // 2) Ждём появления пункта «Все комментарии» (портал в document) и жмём по его
+  // СТРОКЕ реальной мышью. Опрос до ~4с, т.к. меню отрисовывается не мгновенно.
+  const deadline = Date.now() + 4000;
+  while (Date.now() < deadline) {
+    // eslint-disable-next-line no-await-in-loop
+    const coords = await page.evaluate((opts) => {
+      const low = (s) => (s || '').trim().toLowerCase();
+      let titleEl = null;
+      for (const el of document.querySelectorAll('[role="menuitem"], [role="menuitemradio"], [role="menu"] span, [role="menu"] div, span, div')) {
+        const t = low(el.innerText || el.textContent);
+        if (!t) continue;
+        // Точная подпись пункта, либо «заголовок + короткое описание» одним узлом.
+        if (opts.includes(t) || opts.some((w) => t.startsWith(w) && t.length < w.length + 70)) {
+          const r = el.getBoundingClientRect();
+          if (r.width > 0 && r.height > 0) { titleEl = el; break; }
+        }
       }
+      if (!titleEl) return null;
+      let row = titleEl;
+      for (let up = 0; up < 6 && row.parentElement; up += 1) {
+        const role = row.getAttribute && row.getAttribute('role');
+        if (role === 'menuitem' || role === 'menuitemradio' || role === 'button') break;
+        row = row.parentElement;
+      }
+      (row || titleEl).scrollIntoView({ block: 'center' });
+      const r = (row || titleEl).getBoundingClientRect();
+      return { x: r.left + Math.min(r.width / 2, 90), y: r.top + r.height / 2 };
+    }, ALL_COMMENTS).catch(() => null);
+    if (coords) {
+      await page.mouse.click(coords.x, coords.y).catch(() => {});
+      log.info('[FB Bot] Сортировка комментов → «Все комментарии».');
+      await sleep(rand(1500, 2500));
+      return true;
     }
-    if (!titleEl) return null;
-    let row = titleEl;
-    for (let up = 0; up < 6 && row.parentElement; up += 1) {
-      const role = row.getAttribute && row.getAttribute('role');
-      if (role === 'menuitem' || role === 'menuitemradio' || role === 'button') break;
-      row = row.parentElement;
-    }
-    row.scrollIntoView({ block: 'center' });
-    const r = row.getBoundingClientRect();
-    return { x: r.left + Math.min(r.width / 2, 90), y: r.top + r.height / 2 };
-  }, ALL_COMMENTS).catch(() => null);
-  if (coords) {
-    await page.mouse.click(coords.x, coords.y).catch(() => {});
-    log.info('[FB Bot] Сортировка комментов → «Все комментарии».');
-    await sleep(rand(1500, 2500));
-    return true;
+    // eslint-disable-next-line no-await-in-loop
+    await sleep(300);
   }
+  log.info('[FB Bot] Пункт «Все комментарии» в меню не найден.');
   await page.keyboard.press('Escape').catch(() => {});
   return false;
 }
@@ -534,6 +579,7 @@ async function leaveFacebookComment(payload, log, handle = {}) {
     ensureLive();
     log.info(`[FB Bot] Переход на пост: ${postUrl}`);
     await page.goto(postUrl, { waitUntil: 'domcontentloaded', timeout: config.navTimeout });
+    await silenceVideos(page, log);
 
     // Первичное «осматривание» страницы: движение мышью + пауза чтения,
     // пропорциональная объёму текста на странице.
@@ -552,6 +598,7 @@ async function leaveFacebookComment(payload, log, handle = {}) {
     // Пост-пермалинк часто открывается в модальном окне. Если оно есть — курсор
     // и скролл должны быть ВНУТРИ него, иначе крутим фон, а комментарии не грузятся.
     const dialog = await getDialog(page);
+    await silenceVideos(page, log, 2);
     if (dialog) {
       log.info('[FB Bot] Пост открыт в модальном окне — работаю внутри него.');
       const db = await dialog.boundingBox().catch(() => null);

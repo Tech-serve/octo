@@ -896,7 +896,7 @@ function Operation({
                 </button>
               </div>
             )}
-            {task.status === 'error' && !task.dialogId && (
+            {(task.status === 'error' || task.status === 'canceled') && !task.dialogId && (
               <div>
                 <button
                   type="button"
@@ -1003,7 +1003,7 @@ function History({ profiles }) {
                 </button>
               </div>
             )}
-            {t.status === 'error' && !t.dialogId && (
+            {(t.status === 'error' || t.status === 'canceled') && !t.dialogId && (
               <div>
                 <button
                   type="button"
