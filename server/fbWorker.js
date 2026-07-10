@@ -165,6 +165,27 @@ async function submitComment(page, commentBox, log) {
   await enterOnField();
 }
 
+// Гарантируем, что печатать будем ИМЕННО в это поле: кликаем и проверяем, что оно
+// стало активным элементом. Если нет — фокусим и кликаем ещё раз (до 3 попыток).
+// Чинит «поле визуально в фокусе, но символы уходят мимо» (FB не тот activeElement).
+async function focusField(page, box) {
+  for (let i = 0; i < 3; i += 1) {
+    // eslint-disable-next-line no-await-in-loop
+    const active = await box.evaluate((el) => {
+      const a = document.activeElement;
+      return !!(a && (a === el || el.contains(a) || a.isContentEditable));
+    }).catch(() => false);
+    if (active) return true;
+    // eslint-disable-next-line no-await-in-loop
+    try { await box.focus(); } catch { /* ignore */ }
+    // eslint-disable-next-line no-await-in-loop
+    try { await box.click({ timeout: 3000 }); } catch { /* ignore */ }
+    // eslint-disable-next-line no-await-in-loop
+    await sleep(rand(200, 450));
+  }
+  return false;
+}
+
 // Проверяем, что набранный текст РЕАЛЬНО попал в поле. FB иногда пересоздаёт
 // reply-бокс / уводит фокус на первом символе — часть текста теряется, а потом
 // «не подтверждён». Если не попал — перекликаем поле и печатаем заново (до 2 раз).
@@ -818,6 +839,7 @@ async function leaveFacebookComment(payload, log, handle = {}) {
       // рядом с комментом, а лишний скролл может закрыть инлайн-ответ.
       log.info('[FB Bot] Кликаю по reply-боксу и печатаю ответ...');
       await humanClick(page, commentBox);
+      await focusField(page, commentBox);
       await sleep(rand(300, 700));
     } else {
       // Довести поле в зону видимости и «дочитать» перед кликом.
@@ -826,6 +848,7 @@ async function leaveFacebookComment(payload, log, handle = {}) {
       ensureLive();
       log.info('[FB Bot] Навожу курсор и кликаю по полю...');
       await humanClick(page, commentBox);
+      await focusField(page, commentBox);
       await sleep(rand(400, 1000));
       log.info('[FB Bot] Печатаю текст как человек...');
     }
