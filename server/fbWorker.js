@@ -625,12 +625,13 @@ async function findNewEditable(page, timeoutMs) {
       const isEd = (el) => !!(el && el.getAttribute
         && (el.getAttribute('contenteditable') === 'true' || el.getAttribute('role') === 'textbox'));
       const visible = (el) => { const r = el.getBoundingClientRect(); return r.width > 20 && r.height > 5; };
-      // 1) ГЛАВНОЕ: composer, который FB САМ сфокусировал после «Ответить». Когда
-      // под комментом уже есть вложенные ответы, reply-боксов в DOM несколько —
-      // и «первый попавшийся» оказывается не тем. Активный элемент — всегда тот.
+      // 1) ГЛАВНОЕ: composer, который FB САМ сфокусировал после «Ответить» — это и
+      // есть нужный reply-бокс, НЕЗАВИСИМО от пометки. FB часто фокусирует уже
+      // существующий inline reply-бокс (он помечен как pre-reply) — раньше мы его
+      // пропускали и получали «не открылось поле», хотя поле открыто и в фокусе.
       const a = document.activeElement;
-      if (isEd(a) && !a.hasAttribute('data-pre-reply') && visible(a)) return a;
-      // 2) Запас: первый видимый НЕ помеченный редактируемый.
+      if (isEd(a) && visible(a)) return a;
+      // 2) Запас: первый видимый НЕ помеченный (свежесозданный) редактируемый.
       for (const el of document.querySelectorAll('[contenteditable="true"], [role="textbox"]')) {
         if (el.hasAttribute('data-pre-reply')) continue;
         if (visible(el)) return el;
