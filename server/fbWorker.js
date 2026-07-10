@@ -257,6 +257,31 @@ async function detectBlock(page) {
   return null;
 }
 
+// Считать РЕАЛЬНЫЙ текст, который FB показал в браузере: тосты/уведомления
+// (role="alert", aria-live) и небольшие диалоги-предупреждения («Действие
+// заблокировано», «Не удалось опубликовать», «Вы слишком часто…» и т.п.).
+// Возвращает короткую строку или '' — её подставляем в ошибку как есть.
+async function readFbNotice(page) {
+  return page.evaluate(() => {
+    const out = [];
+    const push = (el) => {
+      const t = (el.innerText || el.textContent || '').replace(/\s+/g, ' ').trim();
+      if (t && t.length >= 4 && t.length <= 220 && !out.includes(t)) out.push(t);
+    };
+    for (const el of document.querySelectorAll('[role="alert"], [aria-live="assertive"]')) {
+      const r = el.getBoundingClientRect();
+      if (r.width > 0 && r.height > 0) push(el);
+    }
+    // Маленькая модалка-предупреждение (не сам пост): небольшой диалог с кнопкой.
+    for (const d of document.querySelectorAll('div[role="dialog"]')) {
+      const r = d.getBoundingClientRect();
+      if (r.width > 0 && r.height > 0 && r.height < 380 && r.width < 640
+          && d.querySelector('[role="button"], button')) push(d);
+    }
+    return out.slice(-2).join(' | ');
+  }).catch(() => '');
+}
+
 // Прочитать, ЧТО реально показал FB, когда поле/коммент не нашлись, и вернуть
 // правдивую причину вместо общего «поле не найдено». `hard` = причина
 // однозначная (по тексту FB) — можно валить сразу после открытия поста; иначе
@@ -732,8 +757,11 @@ async function leaveFacebookComment(payload, log, handle = {}) {
       const target = await findCommentByText(page, replyToText, config.selectorTimeout);
       if (!target) {
         const why = await diagnosePostProblem(page);
-        if (why.reason) throw new Error(`${why.reason.charAt(0).toUpperCase()}${why.reason.slice(1)} — ответ поставить не на что.`);
-        throw new Error(`Не найден комментарий для ответа: "${replyToText.slice(0, 40)}…" (родитель ещё не опубликован или скрыт сортировкой).`);
+        const notice = await readFbNotice(page);
+        if (notice) log.info(`[FB Bot] FB показал сообщение: «${notice}»`);
+        const tail = notice ? ` FB показал: «${notice}».` : '';
+        if (why.reason) throw new Error(`${why.reason.charAt(0).toUpperCase()}${why.reason.slice(1)} — ответ поставить не на что.${tail}`);
+        throw new Error(`Не найден комментарий для ответа: "${replyToText.slice(0, 40)}…" (родитель ещё не опубликован или скрыт сортировкой).${tail}`);
       }
       await target.scrollIntoViewIfNeeded().catch(() => {});
       await sleep(rand(500, 1200));
@@ -775,8 +803,11 @@ async function leaveFacebookComment(payload, log, handle = {}) {
           throw e;
         }
         const why = await diagnosePostProblem(page);
-        if (why.reason) throw new Error(`${why.reason.charAt(0).toUpperCase()}${why.reason.slice(1)}.`);
-        throw new Error('Поле для комментария не найдено (возможно, изменилась вёрстка FB или комментарии отключены).');
+        const notice = await readFbNotice(page);
+        if (notice) log.info(`[FB Bot] FB показал сообщение: «${notice}»`);
+        const tail = notice ? ` FB показал: «${notice}».` : '';
+        if (why.reason) throw new Error(`${why.reason.charAt(0).toUpperCase()}${why.reason.slice(1)}.${tail}`);
+        throw new Error(`Поле для комментария не найдено (возможно, изменилась вёрстка FB или комментарии отключены).${tail}`);
       }
     }
 
@@ -852,7 +883,10 @@ async function leaveFacebookComment(payload, log, handle = {}) {
     log.info(`[FB Bot] Проверяю, появился ли ${replyToText ? 'ответ' : 'коммент'} на посте...`);
     const confirmed = await verifyCommentPosted(page, commentText, log);
     if (!confirmed) {
-      throw new Error(`${kind} не подтверждён: не найден на посте (вероятно, FB придержал как спам). Проверьте вручную.`);
+      const notice = await readFbNotice(page);
+      if (notice) log.info(`[FB Bot] FB показал сообщение: «${notice}»`);
+      const extra = notice ? ` FB показал: «${notice}».` : ' (вероятно, FB придержал как спам).';
+      throw new Error(`${kind} не появился на посте.${extra} Проверьте вручную.`);
     }
     log.info(`[FB Bot] ${kind} подтверждён на посте${fieldCleared ? '' : ' (поле не очистилось, но текст есть)'}. Профиль ${profileUuid}`);
 
