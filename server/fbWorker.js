@@ -53,6 +53,18 @@ async function getDialog(page) {
   return null;
 }
 
+// Листать область поста ПО-ЧЕЛОВЕЧЕСКИ (колесо + паузы), но с курсором внутри
+// модалки, если она есть — иначе колесо крутит ленту за постом. Без idle-блуждания,
+// чтобы курсор не уползал. Используется и в поиске коммента, и в проверке.
+async function scrollPostArea(page) {
+  const dlg = await getDialog(page);
+  if (dlg) {
+    const db = await dlg.boundingBox().catch(() => null);
+    if (db) await moveMouse(page, db.x + db.width * rand(0.3, 0.7), db.y + db.height * rand(0.35, 0.75));
+  }
+  await humanScroll(page, { bursts: 1, noIdle: true });
+}
+
 // Надёжный поиск поля комментария. Язык-НЕзависимо: сначала пробуем aria-label
 // (внутри диалога, потом на странице), затем — ЛЮБОЙ видимый редактируемый
 // textbox (contenteditable). Возвращает ElementHandle или null.
@@ -151,6 +163,50 @@ async function submitComment(page, commentBox, log) {
 
   log.info('[FB Bot] Ещё одна попытка: фокус + Enter');
   await enterOnField();
+}
+
+// Проверяем, что набранный текст РЕАЛЬНО попал в поле. FB иногда пересоздаёт
+// reply-бокс / уводит фокус на первом символе — часть текста теряется, а потом
+// «не подтверждён». Если не попал — перекликаем поле и печатаем заново (до 2 раз).
+// refind() возвращает актуальный хэндл поля (или null), если старый отвалился.
+async function ensureTextInField(page, box, text, log, refind) {
+  const clean = (s) => String(s || '').toLowerCase().replace(/\s+/g, ' ').replace(/[^\p{L}\p{N} ]+/gu, '').trim();
+  const want = clean(text).slice(0, 15);
+  if (want.length < 4) return box;
+  const readField = async (b) => { try { return clean(await b.innerText()); } catch { return null; } };
+
+  let field = box;
+  if (((await readField(field)) || '').includes(want)) return field;
+
+  for (let i = 0; i < 2; i += 1) {
+    log.info('[FB Bot] Текст не попал в поле (слетел фокус) — печатаю заново...');
+    // eslint-disable-next-line no-await-in-loop
+    if ((await readField(field)) === null && refind) {
+      // eslint-disable-next-line no-await-in-loop
+      const live = await refind().catch(() => null);
+      if (live) field = live;
+    }
+    // eslint-disable-next-line no-await-in-loop
+    try { await field.focus(); } catch { /* ignore */ }
+    // eslint-disable-next-line no-await-in-loop
+    await humanClick(page, field);
+    // eslint-disable-next-line no-await-in-loop
+    await sleep(rand(200, 500));
+    // eslint-disable-next-line no-await-in-loop
+    await page.keyboard.press('Control+A').catch(() => {});
+    // eslint-disable-next-line no-await-in-loop
+    await page.keyboard.press('Backspace').catch(() => {});
+    // eslint-disable-next-line no-await-in-loop
+    await sleep(rand(150, 350));
+    // eslint-disable-next-line no-await-in-loop
+    await humanType(page, text);
+    // eslint-disable-next-line no-await-in-loop
+    await sleep(rand(400, 800));
+    // eslint-disable-next-line no-await-in-loop
+    if (((await readField(field)) || '').includes(want)) return field;
+  }
+  log.info('[FB Bot] Не удалось надёжно ввести текст — отправляю как есть.');
+  return field;
 }
 
 // Признаки того, что FB показал проверку/капчу/логин, и продолжать нельзя.
@@ -443,19 +499,8 @@ async function findCommentByText(page, text, timeoutMs) {
         if (isMore || isRepl) { b.scrollIntoView({ block: 'center' }); b.click(); return; }
       }
     }).catch(() => {});
-    // Заводим курсор В МОДАЛКУ и листаем ПО-ЧЕЛОВЕЧЕСКИ (колесо + паузы), но без
-    // idle-блуждания — тогда колесо крутит пост, а не ленту за ним. Если модалки
-    // нет (пост открыт как отдельная страница) — скроллим саму страницу, это ок.
     // eslint-disable-next-line no-await-in-loop
-    const dlg = await getDialog(page);
-    if (dlg) {
-      // eslint-disable-next-line no-await-in-loop
-      const db = await dlg.boundingBox().catch(() => null);
-      // eslint-disable-next-line no-await-in-loop
-      if (db) await moveMouse(page, db.x + db.width * rand(0.3, 0.7), db.y + db.height * rand(0.35, 0.75));
-    }
-    // eslint-disable-next-line no-await-in-loop
-    await humanScroll(page, { bursts: 1, noIdle: true });
+    await scrollPostArea(page);
     // eslint-disable-next-line no-await-in-loop
     await page.waitForTimeout(800);
   }
@@ -609,7 +654,7 @@ async function verifyCommentPosted(page, text, log, timeoutMs = 16000) {
     }, snippet);
     if (found) return true;
     // eslint-disable-next-line no-await-in-loop
-    await humanScroll(page, { bursts: 1 });
+    await scrollPostArea(page);
     // eslint-disable-next-line no-await-in-loop
     await sleep(rand(900, 1500));
   }
@@ -755,6 +800,12 @@ async function leaveFacebookComment(payload, log, handle = {}) {
     }
     ensureLive();
     await humanType(page, commentText);
+    // Контроль: текст реально в поле? Если фокус слетел — перепечатать и обновить
+    // хэндл поля (для reply — новый reply-бокс, для топ-коммента — главный композер).
+    commentBox = await ensureTextInField(
+      page, commentBox, commentText, log,
+      replyToText ? () => findNewEditable(page, 4000) : () => findCommentBox(page, 3000),
+    );
 
     // Прикрепить картинку (если задана) — после текста, до отправки.
     if (imagePath) {
