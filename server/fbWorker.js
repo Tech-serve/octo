@@ -603,11 +603,18 @@ async function findNewEditable(page, timeoutMs) {
   while (Date.now() < deadline) {
     // eslint-disable-next-line no-await-in-loop
     const h = await page.evaluateHandle(() => {
-      const els = document.querySelectorAll('[contenteditable="true"], [role="textbox"]');
-      for (const el of els) {
+      const isEd = (el) => !!(el && el.getAttribute
+        && (el.getAttribute('contenteditable') === 'true' || el.getAttribute('role') === 'textbox'));
+      const visible = (el) => { const r = el.getBoundingClientRect(); return r.width > 20 && r.height > 5; };
+      // 1) ГЛАВНОЕ: composer, который FB САМ сфокусировал после «Ответить». Когда
+      // под комментом уже есть вложенные ответы, reply-боксов в DOM несколько —
+      // и «первый попавшийся» оказывается не тем. Активный элемент — всегда тот.
+      const a = document.activeElement;
+      if (isEd(a) && !a.hasAttribute('data-pre-reply') && visible(a)) return a;
+      // 2) Запас: первый видимый НЕ помеченный редактируемый.
+      for (const el of document.querySelectorAll('[contenteditable="true"], [role="textbox"]')) {
         if (el.hasAttribute('data-pre-reply')) continue;
-        const r = el.getBoundingClientRect();
-        if (r.width > 20 && r.height > 5) return el;
+        if (visible(el)) return el;
       }
       return null;
     });
