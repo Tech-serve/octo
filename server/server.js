@@ -42,8 +42,24 @@ app.post('/api/sso/accept', handleSsoAccept);
 app.get('/api/me', whoAmI);
 
 // Сохранить картинку из data:URL в файл. Возвращает путь или null.
+// Также принимает уже загруженный файл (URL /uploads/...): копирует его в НОВЫЙ
+// файл задачи — чтобы задача не зависела от исходного черновика (его могут
+// заменить/удалить), и картинка точно осталась в истории даже если varyImage
+// на клиенте не смог перегнать URL в data:URL.
 function saveImage(dataUrl) {
   if (!dataUrl || typeof dataUrl !== 'string') return null;
+  const asUpload = dataUrl.match(/\/uploads\/([\w.-]+\.(?:png|jpe?g|webp|gif))(?:\?|#|$)/i);
+  if (asUpload) {
+    try {
+      const src = path.join(config.uploadDir, path.basename(asUpload[1]));
+      if (fs.existsSync(src)) {
+        const dst = path.join(config.uploadDir, `${crypto.randomUUID()}${path.extname(src)}`);
+        fs.copyFileSync(src, dst);
+        return dst;
+      }
+    } catch { /* ниже попробуем как data:URL */ }
+    return null;
+  }
   const m = dataUrl.match(/^data:image\/(png|jpe?g|webp|gif);base64,(.+)$/i);
   if (!m) return null;
   const ext = m[1].toLowerCase() === 'jpeg' ? 'jpg' : m[1].toLowerCase();
@@ -559,9 +575,13 @@ function cleanupOld() {
     for (const p of removed) {
       try { fs.unlinkSync(p); } catch { /* уже нет */ }
     }
-    // Осиротевшие файлы старше 30 дней (на случай, если задача уже удалена).
+    // Осиротевшие файлы старше 30 дней (на случай, если задача уже удалена). НО
+    // НЕ трогаем те, на которые ссылается любой черновик (поля/результаты), иначе
+    // картинки пропадают из истории и логов операций.
     const cutoff = Date.now() - 30 * 24 * 3600 * 1000;
+    const keep = store.referencedUploadFiles();
     for (const f of fs.readdirSync(config.uploadDir)) {
+      if (keep.has(f)) continue;
       const fp = path.join(config.uploadDir, f);
       try { if (fs.statSync(fp).mtimeMs < cutoff) fs.unlinkSync(fp); } catch { /* пропустим */ }
     }

@@ -110,6 +110,20 @@ function deleteDraft(owner, key) {
   draftDeleteStmt.run(owner || 'local', String(key));
 }
 
+// Имена файлов из /uploads, на которые ссылается ЛЮБОЙ черновик (поля/результаты).
+// Их нельзя удалять автоочисткой, иначе картинки пропадают из истории/логов.
+const draftsAllDataStmt = db.prepare('SELECT data FROM drafts');
+function referencedUploadFiles() {
+  const set = new Set();
+  const re = /\/uploads\/([\w.-]+\.(?:png|jpe?g|webp|gif))/gi;
+  for (const row of draftsAllDataStmt.all()) {
+    const s = row.data || '';
+    let m = re.exec(s);
+    while (m) { set.add(m[1]); m = re.exec(s); }
+  }
+  return set;
+}
+
 // Строку БД -> объект задачи привычной формы (с payload).
 function rowToTask(r) {
   if (!r) return null;
@@ -330,5 +344,5 @@ module.exports = {
   flagProfile, clearProfileFlag, listFlags,
   upsertWhitelist, getWhitelist, listWhitelist,
   listByDialog, deleteTask,
-  getDrafts, putDraft, deleteDraft,
+  getDrafts, putDraft, deleteDraft, referencedUploadFiles,
 };

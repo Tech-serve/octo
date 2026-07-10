@@ -191,7 +191,9 @@ async function uploadDraftImage(dataUrl) {
 function varyImage(dataUrl) {
   return new Promise((resolve) => {
     const img = new Image()
-    img.crossOrigin = 'anonymous'
+    // БЕЗ crossOrigin: картинки /uploads — того же origin, тейнта нет. С crossOrigin
+    // браузер переиспользовал не-CORS кэш от превью → canvas tainted → toDataURL
+    // падал → в задачу уходил URL, и картинка не сохранялась в истории/логах.
     img.onload = () => {
       const W = img.naturalWidth
       const H = img.naturalHeight
