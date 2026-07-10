@@ -97,13 +97,29 @@ const MAX_OPS = 10
 
 // Человечная вариация картинки: лёгкий рекадр/фильтр/пересохранение — как
 // естественный ре-шер, а не «невидимый шум». Меняет отпечаток, выглядит живо.
+// Полный src картинки: data:URL как есть, серверный '/uploads/..' — с API_BASE.
+function imageSrc(v) {
+  if (!v) return ''
+  return v.startsWith('data:') ? v : `${API_BASE}${v}`
+}
+
+// Загрузить картинку на сервер (файлом). Возвращает URL или null.
+async function uploadDraftImage(dataUrl) {
+  try {
+    const { data } = await axios.post(`${API_BASE}/api/drafts/image`, { image: dataUrl })
+    return (data && data.url) || null
+  } catch { return null }
+}
+
 function varyImage(dataUrl) {
   return new Promise((resolve) => {
     const img = new Image()
+    img.crossOrigin = 'anonymous'
     img.onload = () => {
       const W = img.naturalWidth
       const H = img.naturalHeight
       if (!W || !H) { resolve(dataUrl); return }
+      try {
       const rnd = (a, b) => a + Math.random() * (b - a)
       const cl = Math.round(W * rnd(0, 0.06))
       const cr = Math.round(W * rnd(0, 0.06))
@@ -129,9 +145,10 @@ function varyImage(dataUrl) {
         + `hue-rotate(${rnd(-4, 4).toFixed(1)}deg)`
       ctx.drawImage(img, cl, ct, sw, sh, 0, 0, dw, dh)
       resolve(canvas.toDataURL('image/jpeg', rnd(0.66, 0.72)))
+      } catch { resolve(dataUrl) } // напр. canvas «tainted» при кросс-домене
     }
     img.onerror = () => resolve(dataUrl)
-    img.src = dataUrl
+    img.src = imageSrc(dataUrl)
   })
 }
 
@@ -170,7 +187,7 @@ function ImagePicker({
     <div style={{ position: 'relative', flex: '0 0 auto' }}>
       <label className="tm-imgbox" title={imageName || 'Прикрепить картинку'} style={{ width: size, height: size }}>
         {image ? (
-          <img src={image} alt="" style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
+          <img src={imageSrc(image)} alt="" style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
         ) : (
           <span style={{ fontSize: '17px' }}>🖼</span>
         )}
@@ -193,14 +210,13 @@ function ImagePicker({
 // Профили и таймеры занятости приходят сверху (общие для всех вкладок).
 // ─────────────────────────────────────────────────────────────────────────
 function Operation({
-  mode, opId, profiles, loadingProfiles, profilesError, loadProfiles, busy, busyAt, now,
+  mode, opId, initial, profiles, loadingProfiles, profilesError, loadProfiles, busy, busyAt, now,
 }) {
-  // Черновик операции (форма + результаты) сохраняется в браузере и переживает
-  // перезагрузку страницы. Ключ уникален на режим+операцию.
-  const storageKey = `octobot:op:${mode}:${opId}`
-  const [saved] = useState(() => {
-    try { return JSON.parse(localStorage.getItem(storageKey) || '{}') } catch { return {} }
-  })
+  // Черновик операции хранится на СЕРВЕРЕ (надёжно). Начальные значения приходят
+  // из уже загруженной карты черновиков (prop initial). Ключ — режим+операция.
+  const draftKey = `op:${mode}:${opId}`
+  const [saved] = useState(() => initial || {})
+  const draftSaveTimer = useRef(null)
   const [profileUuid, setProfileUuid] = useState(saved.profileUuid || '')
   const [posts, setPosts] = useState(saved.posts || [{ url: '', image: null, imageName: '' }])
   // Режим 1: одна картинка на всю операцию (её вешаем на КАЖДЫЙ пост, делая из
@@ -229,24 +245,18 @@ function Operation({
   const [dialogs, setDialogs] = useState(saved.dialogs || [{ steps: [newStep(null)] }])
   const pollRef = useRef(null)
 
-  // Сохраняем черновик при любом изменении. Если картинки не влезают в квоту —
-  // сохраняем без base64 (текст/фейки/результаты остаются).
+  // Сохраняем черновик на сервер (debounce). Картинки хранятся как серверные URL
+  // (загружаются при выборе), поэтому тело маленькое — без квоты и потери данных.
   useEffect(() => {
     const data = {
       profileUuid, posts, commentText, perComments, tasks, post2, entries, post3, dialogs, opImage, opImageName,
     }
-    try {
-      localStorage.setItem(storageKey, JSON.stringify(data))
-    } catch {
-      try {
-        const noImg = (arr) => arr.map((x) => ({ ...x, image: null }))
-        const noImgSteps = (ds) => ds.map((d) => ({ steps: d.steps.map((s) => ({ ...s, image: null })) }))
-        localStorage.setItem(storageKey, JSON.stringify({
-          ...data, posts: noImg(posts), entries: noImg(entries), dialogs: noImgSteps(dialogs), opImage: null,
-        }))
-      } catch { /* совсем не влезло — пропустим */ }
-    }
-  }, [storageKey, profileUuid, posts, commentText, perComments, tasks, post2, entries, post3, dialogs, opImage, opImageName])
+    clearTimeout(draftSaveTimer.current)
+    draftSaveTimer.current = setTimeout(() => {
+      axios.put(`${API_BASE}/api/drafts/${draftKey}`, data).catch(() => {})
+    }, 700)
+    return () => clearTimeout(draftSaveTimer.current)
+  }, [draftKey, profileUuid, posts, commentText, perComments, tasks, post2, entries, post3, dialogs, opImage, opImageName])
 
   // Метка занятости профиля: «занят до 14:32» (уже идёт) или «занят с 15:10».
   const profileBusy = (uuid) => {
@@ -299,7 +309,11 @@ function Operation({
   const pickOpImage = (file) => {
     if (!file) return
     const reader = new FileReader()
-    reader.onload = () => { setOpImage(reader.result); setOpImageName(file.name) }
+    reader.onload = async () => {
+      setOpImage(reader.result); setOpImageName(file.name) // мгновенное превью
+      const url = await uploadDraftImage(reader.result) // затем — файл на сервер
+      if (url) setOpImage(url)
+    }
     reader.readAsDataURL(file)
   }
 
@@ -321,7 +335,11 @@ function Operation({
   const pickEntryImage = (i, file) => {
     if (!file) return
     const reader = new FileReader()
-    reader.onload = () => patchEntry(i, { image: reader.result, imageName: file.name })
+    reader.onload = async () => {
+      patchEntry(i, { image: reader.result, imageName: file.name })
+      const url = await uploadDraftImage(reader.result)
+      if (url) patchEntry(i, { image: url })
+    }
     reader.readAsDataURL(file)
   }
 
@@ -337,7 +355,11 @@ function Operation({
   const pickStepImage = (di, si, file) => {
     if (!file) return
     const reader = new FileReader()
-    reader.onload = () => patchStep(di, si, { image: reader.result, imageName: file.name })
+    reader.onload = async () => {
+      patchStep(di, si, { image: reader.result, imageName: file.name })
+      const url = await uploadDraftImage(reader.result)
+      if (url) patchStep(di, si, { image: url })
+    }
     reader.readAsDataURL(file)
   }
 
@@ -1076,23 +1098,39 @@ function App() {
       return (n === 1 || n === 2 || n === 3) ? n : 1
     } catch { return 1 }
   })
-  // Восстанавливаем набор операций (сколько создано + активная) из localStorage,
-  // иначе при обновлении страницы вкладки сбрасывались на одну.
-  const savedTabs = (() => {
-    try {
-      const s = JSON.parse(localStorage.getItem('octobot:tabs') || 'null')
-      if (s && s.tabs && s.activeId && s.nextId) return s
-    } catch { /* пусто */ }
-    return null
-  })()
-  const [tabs, setTabs] = useState(savedTabs?.tabs || { 1: [{ id: 1 }], 2: [{ id: 1 }], 3: [{ id: 1 }] })
-  const [activeId, setActiveId] = useState(savedTabs?.activeId || { 1: 1, 2: 1, 3: 1 })
-  const nextId = useRef(savedTabs?.nextId || { 1: 2, 2: 2, 3: 2 })
+  // Черновики операций теперь хранятся на СЕРВЕРЕ (надёжно, без квоты и изоляции
+  // iframe). drafts = карта { 'tabs': {...}, 'op:<m>:<id>': {...} }. Пока не
+  // загрузились — не монтируем операции (иначе они стартанут с пустого состояния).
+  const [drafts, setDrafts] = useState(null)
+  const [tabs, setTabs] = useState({ 1: [{ id: 1 }], 2: [{ id: 1 }], 3: [{ id: 1 }] })
+  const [activeId, setActiveId] = useState({ 1: 1, 2: 1, 3: 1 })
+  const nextId = useRef({ 1: 2, 2: 2, 3: 2 })
+  const tabsSaveTimer = useRef(null)
+  const tabsHydrated = useRef(false)
 
   useEffect(() => {
-    try {
-      localStorage.setItem('octobot:tabs', JSON.stringify({ tabs, activeId, nextId: nextId.current }))
-    } catch { /* квота */ }
+    let alive = true
+    axios.get(`${API_BASE}/api/drafts`).then(({ data }) => {
+      if (!alive) return
+      const items = (data && data.items) || {}
+      const t = items.tabs
+      if (t && t.tabs && t.activeId && t.nextId) {
+        setTabs(t.tabs); setActiveId(t.activeId); nextId.current = t.nextId
+      }
+      tabsHydrated.current = true
+      setDrafts(items)
+    }).catch(() => { tabsHydrated.current = true; setDrafts({}) })
+    return () => { alive = false }
+  }, [])
+
+  useEffect(() => {
+    if (!tabsHydrated.current) return undefined // не перетираем серверный набор до загрузки
+    clearTimeout(tabsSaveTimer.current)
+    const payload = { tabs, activeId, nextId: nextId.current }
+    tabsSaveTimer.current = setTimeout(() => {
+      axios.put(`${API_BASE}/api/drafts/tabs`, payload).catch(() => {})
+    }, 500)
+    return () => clearTimeout(tabsSaveTimer.current)
   }, [tabs, activeId])
 
   // Запоминаем активную вкладку режима, чтобы не слетала при обновлении страницы.
@@ -1167,13 +1205,21 @@ function App() {
   // Дублировать активную операцию: копируем все её поля (посты/фейки/тексты/
   // картинки/диалоги), но БЕЗ логов и результатов (tasks). Пишем в localStorage
   // новой вкладки ДО её монтирования — тогда новая Operation прочитает копию.
-  const duplicateTab = (m) => {
+  const duplicateTab = async (m) => {
     if (tabs[m].length >= MAX_OPS) return
-    let data
-    try { data = JSON.parse(localStorage.getItem(`octobot:op:${m}:${activeId[m]}`) || '{}') } catch { data = {} }
+    const srcKey = `op:${m}:${activeId[m]}`
+    // Берём АКТУАЛЬНУЮ версию исходной операции с сервера (там последнее сохранение),
+    // иначе — из локального кэша черновиков.
+    let data = (drafts && drafts[srcKey]) || {}
+    try {
+      const { data: r } = await axios.get(`${API_BASE}/api/drafts`)
+      if (r && r.items && r.items[srcKey]) data = r.items[srcKey]
+    } catch { /* оставим из кэша */ }
     const id = nextId.current[m]
     nextId.current[m] += 1
-    try { localStorage.setItem(`octobot:op:${m}:${id}`, JSON.stringify({ ...data, tasks: [] })) } catch { /* квота */ }
+    const copy = { ...data, tasks: [] } // копируем поля/картинки, но БЕЗ логов
+    try { await axios.put(`${API_BASE}/api/drafts/op:${m}:${id}`, copy) } catch { /* пропустим */ }
+    setDrafts((prev) => ({ ...(prev || {}), [`op:${m}:${id}`]: copy }))
     setTabs((prev) => ({ ...prev, [m]: [...prev[m], { id }] }))
     setActiveId((prev) => ({ ...prev, [m]: id }))
   }
@@ -1188,6 +1234,8 @@ function App() {
       const pick = (next[idx] || next[next.length - 1]).id
       setActiveId((prev) => ({ ...prev, [m]: pick }))
     }
+    axios.delete(`${API_BASE}/api/drafts/op:${m}:${id}`).catch(() => {})
+    setDrafts((prev) => { if (!prev) return prev; const n = { ...prev }; delete n[`op:${m}:${id}`]; return n })
   }
 
   const MODES = [
@@ -1204,7 +1252,7 @@ function App() {
     )
   }
 
-  if (!authReady) {
+  if (!authReady || drafts === null) {
     return (
       <div style={{ maxWidth: '1100px', margin: '0 auto', padding: '34px 24px', color: 'var(--muted)' }}>
         Загрузка…
@@ -1299,6 +1347,7 @@ function App() {
               <Operation
                 mode={m}
                 opId={t.id}
+                initial={drafts[`op:${m}:${t.id}`] || {}}
                 profiles={profiles}
                 loadingProfiles={loadingProfiles}
                 profilesError={profilesError}

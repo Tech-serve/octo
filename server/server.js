@@ -520,6 +520,34 @@ app.get('/api/tasks', ownerMiddleware, (req, res) => {
   res.json({ tasks: store.list(owner), ...queue.stats() });
 });
 
+// ── Черновики операций: надёжное серверное хранение вместо localStorage ──
+// Структура вкладок (key='tabs') и поля каждой операции (key='op:<mode>:<id>').
+// Картинки — файлами через /api/drafts/image (в data только их URL).
+app.get('/api/drafts', ownerMiddleware, (req, res) => {
+  res.json({ items: store.getDrafts(req.owner) });
+});
+
+app.put('/api/drafts/:key', ownerMiddleware, (req, res) => {
+  const key = String(req.params.key || '');
+  if (!/^(tabs|op:\d+:\d+)$/.test(key)) return res.status(400).json({ error: 'Некорректный ключ' });
+  store.putDraft(req.owner, key, req.body ?? null);
+  res.json({ ok: true });
+});
+
+app.delete('/api/drafts/:key', ownerMiddleware, (req, res) => {
+  const key = String(req.params.key || '');
+  if (!/^(tabs|op:\d+:\d+)$/.test(key)) return res.status(400).json({ error: 'Некорректный ключ' });
+  store.deleteDraft(req.owner, key);
+  res.json({ ok: true });
+});
+
+// Загрузка картинки операции ФАЙЛОМ. Тело: { image: dataURL }. Возвращает { url }.
+app.post('/api/drafts/image', ownerMiddleware, (req, res) => {
+  const p = saveImage(req.body && req.body.image);
+  if (!p) return res.status(400).json({ error: 'Не распознан формат картинки' });
+  res.json({ url: `/uploads/${path.basename(p)}` });
+});
+
 app.get('/api/health', (req, res) => {
   res.json({ ok: true, ...queue.stats() });
 });

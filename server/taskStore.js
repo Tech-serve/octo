@@ -74,6 +74,42 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS idx_whitelist_fbid ON fb_whitelist(fb_id);
 `);
 
+// Черновики операций (надёжное серверное хранение вместо localStorage): структура
+// вкладок и поля каждой операции. Ключ — owner + key ('tabs' | 'op:<mode>:<id>').
+// data — JSON. Картинки хранятся ФАЙЛАМИ (в data только их URL).
+db.exec(`
+  CREATE TABLE IF NOT EXISTS drafts (
+    owner      TEXT NOT NULL,
+    key        TEXT NOT NULL,
+    data       TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (owner, key)
+  );
+`);
+
+const draftsGetAllStmt = db.prepare('SELECT key, data FROM drafts WHERE owner = ?');
+const draftPutStmt = db.prepare(
+  'INSERT INTO drafts (owner, key, data, updated_at) VALUES (?, ?, ?, ?) '
+  + 'ON CONFLICT(owner, key) DO UPDATE SET data = excluded.data, updated_at = excluded.updated_at',
+);
+const draftDeleteStmt = db.prepare('DELETE FROM drafts WHERE owner = ? AND key = ?');
+
+function getDrafts(owner) {
+  const items = {};
+  for (const row of draftsGetAllStmt.all(owner || 'local')) {
+    try { items[row.key] = JSON.parse(row.data); } catch { /* пропустим битый */ }
+  }
+  return items;
+}
+
+function putDraft(owner, key, data) {
+  draftPutStmt.run(owner || 'local', String(key), JSON.stringify(data ?? null), new Date().toISOString());
+}
+
+function deleteDraft(owner, key) {
+  draftDeleteStmt.run(owner || 'local', String(key));
+}
+
 // Строку БД -> объект задачи привычной формы (с payload).
 function rowToTask(r) {
   if (!r) return null;
@@ -294,4 +330,5 @@ module.exports = {
   flagProfile, clearProfileFlag, listFlags,
   upsertWhitelist, getWhitelist, listWhitelist,
   listByDialog, deleteTask,
+  getDrafts, putDraft, deleteDraft,
 };
