@@ -1076,9 +1076,24 @@ function App() {
       return (n === 1 || n === 2 || n === 3) ? n : 1
     } catch { return 1 }
   })
-  const [tabs, setTabs] = useState({ 1: [{ id: 1 }], 2: [{ id: 1 }], 3: [{ id: 1 }] })
-  const [activeId, setActiveId] = useState({ 1: 1, 2: 1, 3: 1 })
-  const nextId = useRef({ 1: 2, 2: 2, 3: 2 })
+  // Восстанавливаем набор операций (сколько создано + активная) из localStorage,
+  // иначе при обновлении страницы вкладки сбрасывались на одну.
+  const savedTabs = (() => {
+    try {
+      const s = JSON.parse(localStorage.getItem('octobot:tabs') || 'null')
+      if (s && s.tabs && s.activeId && s.nextId) return s
+    } catch { /* пусто */ }
+    return null
+  })()
+  const [tabs, setTabs] = useState(savedTabs?.tabs || { 1: [{ id: 1 }], 2: [{ id: 1 }], 3: [{ id: 1 }] })
+  const [activeId, setActiveId] = useState(savedTabs?.activeId || { 1: 1, 2: 1, 3: 1 })
+  const nextId = useRef(savedTabs?.nextId || { 1: 2, 2: 2, 3: 2 })
+
+  useEffect(() => {
+    try {
+      localStorage.setItem('octobot:tabs', JSON.stringify({ tabs, activeId, nextId: nextId.current }))
+    } catch { /* квота */ }
+  }, [tabs, activeId])
 
   // Запоминаем активную вкладку режима, чтобы не слетала при обновлении страницы.
   useEffect(() => {
@@ -1274,6 +1289,9 @@ function App() {
                 ⧉
               </button>
             </div>
+            <span className="tm-muted" style={{ alignSelf: 'center', marginLeft: '8px', fontSize: '12px' }}>
+              Операций: {tabs[m].length}
+            </span>
           </div>
 
           {tabs[m].map((t) => (
