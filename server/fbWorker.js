@@ -617,32 +617,41 @@ async function findFocusedEditable(page) {
 // Существующие поля (в т.ч. главный композер) заранее помечаются data-pre-reply,
 // поэтому берём то, что БЕЗ этой метки. FB не всегда фокусирует reply-бокс сам,
 // так что ищем по DOM, а не по фокусу.
-async function findNewEditable(page, timeoutMs) {
+async function findNewEditable(page, timeoutMs, log) {
   const deadline = Date.now() + timeoutMs;
+  let lastInfo = null;
   while (Date.now() < deadline) {
     // eslint-disable-next-line no-await-in-loop
     const h = await page.evaluateHandle(() => {
-      const isEd = (el) => !!(el && el.getAttribute
-        && (el.getAttribute('contenteditable') === 'true' || el.getAttribute('role') === 'textbox'));
-      const visible = (el) => { const r = el.getBoundingClientRect(); return r.width > 20 && r.height > 5; };
-      // 1) ГЛАВНОЕ: composer, который FB САМ сфокусировал после «Ответить» — это и
-      // есть нужный reply-бокс, НЕЗАВИСИМО от пометки. FB часто фокусирует уже
-      // существующий inline reply-бокс (он помечен как pre-reply) — раньше мы его
-      // пропускали и получали «не открылось поле», хотя поле открыто и в фокусе.
+      // isContentEditable — надёжно: ловит contenteditable="true" И contenteditable=""
+      // (FB часто отдаёт composer именно так), в отличие от строкового ="true".
+      const isEd = (el) => !!(el && (el.isContentEditable === true
+        || (el.getAttribute && el.getAttribute('role') === 'textbox')));
+      const visible = (el) => { const r = el.getBoundingClientRect(); return r.width > 25 && r.height > 8; };
+      const all = [...document.querySelectorAll('[contenteditable], [role="textbox"]')].filter((e) => isEd(e) && visible(e));
       const a = document.activeElement;
-      if (isEd(a) && visible(a)) return a;
-      // 2) Запас: первый видимый НЕ помеченный (свежесозданный) редактируемый.
-      for (const el of document.querySelectorAll('[contenteditable="true"], [role="textbox"]')) {
-        if (el.hasAttribute('data-pre-reply')) continue;
-        if (visible(el)) return el;
-      }
-      return null;
+      let pick = null; let via = 'none';
+      // 1) Тот, что FB сам сфокусировал после «Ответить» — это и есть нужный бокс.
+      if (isEd(a) && visible(a)) { pick = a; via = 'active'; }
+      // 2) Свежесозданный (без метки pre-reply).
+      if (!pick) { pick = all.find((e) => !e.hasAttribute('data-pre-reply')) || null; if (pick) via = 'unmarked'; }
+      // 3) Последний резерв — самый нижний видимый редактируемый (обычно это и есть
+      // открытый reply-бокс под комментом).
+      if (!pick && all.length) { pick = all[all.length - 1]; via = 'any'; }
+      window.__lastEd = { count: all.length, via, activeEd: isEd(a) };
+      return pick;
     });
+    // eslint-disable-next-line no-await-in-loop
+    lastInfo = await page.evaluate(() => window.__lastEd).catch(() => null);
     const el = h.asElement();
-    if (el) return el;
+    if (el) {
+      if (log && lastInfo) log.info(`[FB Bot] Reply-бокс найден: редактируемых на странице=${lastInfo.count}, взят via=${lastInfo.via}`);
+      return el;
+    }
     // eslint-disable-next-line no-await-in-loop
     await sleep(300);
   }
+  if (log) log.info(`[FB Bot] Reply-бокс НЕ найден за отведённое время. ${lastInfo ? `редактируемых=${lastInfo.count}, фокус-редактируемый=${lastInfo.activeEd}` : ''}`);
   return null;
 }
 
@@ -817,14 +826,16 @@ async function leaveFacebookComment(payload, log, handle = {}) {
       // Метим существующие редактируемые поля — чтобы после «Ответить» отличить
       // НОВОЕ (reply-бокс) от главного композера.
       await page.evaluate(() => {
-        document.querySelectorAll('[contenteditable="true"], [role="textbox"]')
-          .forEach((el) => el.setAttribute('data-pre-reply', '1'));
+        // isContentEditable ловит и contenteditable="" (FB так отдаёт composer),
+        // строковая проверка ="true" его пропускала.
+        document.querySelectorAll('[contenteditable], [role="textbox"]')
+          .forEach((el) => { if (el.isContentEditable || (el.getAttribute && el.getAttribute('role') === 'textbox')) el.setAttribute('data-pre-reply', '1'); });
       }).catch(() => {});
       const clicked = await clickReply(page, target, log);
       if (!clicked) throw new Error('Не найдена кнопка «Ответить» у комментария');
       await sleep(rand(1000, 1800));
       // Берём ИМЕННО новый reply-бокс (не главный композер).
-      commentBox = await findNewEditable(page, 10000);
+      commentBox = await findNewEditable(page, 10000, log);
       if (!commentBox) throw new Error('Не открылось поле ответа (reply-box) — как ответ коммент не отправлен.');
     } else {
       // ВЕРХНЕУРОВНЕВЫЙ КОММЕНТ: скролл к полю с ранней остановкой.
@@ -885,7 +896,7 @@ async function leaveFacebookComment(payload, log, handle = {}) {
     // хэндл поля (для reply — новый reply-бокс, для топ-коммента — главный композер).
     commentBox = await ensureTextInField(
       page, commentBox, commentText, log,
-      replyToText ? () => findNewEditable(page, 4000) : () => findCommentBox(page, 3000),
+      replyToText ? () => findNewEditable(page, 4000, log) : () => findCommentBox(page, 3000),
     );
 
     // Прикрепить картинку (если задана) — после текста, до отправки.
