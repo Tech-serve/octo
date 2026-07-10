@@ -1149,6 +1149,20 @@ function App() {
     setActiveId((prev) => ({ ...prev, [m]: id }))
   }
 
+  // Дублировать активную операцию: копируем все её поля (посты/фейки/тексты/
+  // картинки/диалоги), но БЕЗ логов и результатов (tasks). Пишем в localStorage
+  // новой вкладки ДО её монтирования — тогда новая Operation прочитает копию.
+  const duplicateTab = (m) => {
+    if (tabs[m].length >= MAX_OPS) return
+    let data
+    try { data = JSON.parse(localStorage.getItem(`octobot:op:${m}:${activeId[m]}`) || '{}') } catch { data = {} }
+    const id = nextId.current[m]
+    nextId.current[m] += 1
+    try { localStorage.setItem(`octobot:op:${m}:${id}`, JSON.stringify({ ...data, tasks: [] })) } catch { /* квота */ }
+    setTabs((prev) => ({ ...prev, [m]: [...prev[m], { id }] }))
+    setActiveId((prev) => ({ ...prev, [m]: id }))
+  }
+
   const closeTab = (m, id) => {
     const list = tabs[m]
     const idx = list.findIndex((x) => x.id === id)
@@ -1238,16 +1252,28 @@ function App() {
                 )}
               </div>
             ))}
-            <button
-              type="button"
-              className="tm-add-tab"
-              onClick={() => addTab(m)}
-              disabled={tabs[m].length >= MAX_OPS}
-              title={tabs[m].length >= MAX_OPS ? `Максимум ${MAX_OPS} операций` : 'Добавить операцию'}
-              style={{ width: '48px', height: '36px', fontSize: '20px', marginLeft: '4px', marginBottom: '2px' }}
-            >
-              +
-            </button>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '2px', marginLeft: '4px', marginBottom: '2px' }}>
+              <button
+                type="button"
+                className="tm-add-tab"
+                onClick={() => addTab(m)}
+                disabled={tabs[m].length >= MAX_OPS}
+                title={tabs[m].length >= MAX_OPS ? `Максимум ${MAX_OPS} операций` : 'Новая операция (пустая)'}
+                style={{ width: '48px', height: '17px', fontSize: '15px', lineHeight: 1, padding: 0 }}
+              >
+                +
+              </button>
+              <button
+                type="button"
+                className="tm-add-tab"
+                onClick={() => duplicateTab(m)}
+                disabled={tabs[m].length >= MAX_OPS}
+                title={tabs[m].length >= MAX_OPS ? `Максимум ${MAX_OPS} операций` : 'Дублировать операцию (все поля, без логов)'}
+                style={{ width: '48px', height: '17px', fontSize: '13px', lineHeight: 1, padding: 0 }}
+              >
+                ⧉
+              </button>
+            </div>
           </div>
 
           {tabs[m].map((t) => (
