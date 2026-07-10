@@ -92,8 +92,85 @@ function taskStatusText(task) {
 // Максимум постов за один раз (совпадает с серверным лимитом на фейк).
 const MAX_POSTS = 10
 
-// Максимум операций (вкладок) в каждом режиме.
-const MAX_OPS = 10
+// Режимы с двумя уровнями вкладок: Оффер → Операция. Лимита на число операций нет.
+const MODE_IDS = [1, 2, 3]
+
+// Структура вкладок по умолчанию: в каждом режиме один оффер с одной операцией.
+function defaultOffers() {
+  const offers = {}; const activeOffer = {}; const nextOfferId = {}; const nextOpId = {}
+  for (const m of MODE_IDS) {
+    offers[m] = [{ id: 1, name: 'Оффер 1', ops: [{ id: 1, name: 'Операция 1' }], activeOp: 1 }]
+    activeOffer[m] = 1; nextOfferId[m] = 2; nextOpId[m] = 2
+  }
+  return { offers, activeOffer, nextOfferId, nextOpId }
+}
+
+// Привести сохранённую структуру к новому формату (в т.ч. миграция со старого
+// плоского { tabs, activeId, nextId } — оборачиваем операции в один оффер).
+function migrateStruct(t) {
+  if (!t) return defaultOffers()
+  if (t.offers && t.activeOffer && t.nextOfferId && t.nextOpId) return t
+  if (t.tabs && t.activeId && t.nextId) {
+    const offers = {}; const activeOffer = {}; const nextOfferId = {}; const nextOpId = {}
+    for (const m of MODE_IDS) {
+      const ops = (t.tabs[m] || [{ id: 1 }]).map((x, i) => ({ id: x.id, name: `Операция ${i + 1}` }))
+      offers[m] = [{ id: 1, name: 'Оффер 1', ops, activeOp: t.activeId[m] || ops[0].id }]
+      activeOffer[m] = 1; nextOfferId[m] = 2; nextOpId[m] = t.nextId[m] || (ops.length + 1)
+    }
+    return { offers, activeOffer, nextOfferId, nextOpId }
+  }
+  return defaultOffers()
+}
+
+// Вкладка с переименованием по двойному клику (для офферов и операций).
+function EditableTab({
+  label, active, onActivate, onRename, onClose, closable,
+}) {
+  const [editing, setEditing] = useState(false)
+  const [val, setVal] = useState(label)
+  const startEdit = () => { setVal(label); setEditing(true) }
+  const commit = () => { setEditing(false); const v = val.trim(); if (v && v !== label) onRename(v) }
+  return (
+    <div
+      role="button"
+      tabIndex={0}
+      className={`tm-tab${active ? ' active' : ''}`}
+      onClick={() => { if (!editing) onActivate() }}
+      onDoubleClick={startEdit}
+      onKeyDown={(e) => { if (e.key === 'Enter' && !editing) onActivate() }}
+      title={editing ? '' : 'Двойной клик — переименовать'}
+    >
+      {editing ? (
+        <input
+          autoFocus
+          value={val}
+          onChange={(e) => setVal(e.target.value)}
+          onBlur={commit}
+          onClick={(e) => e.stopPropagation()}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter') { e.preventDefault(); commit() }
+            if (e.key === 'Escape') { setVal(label); setEditing(false) }
+          }}
+          style={{
+            width: `${Math.max(6, val.length)}ch`, font: 'inherit', border: 'none', background: 'transparent', color: 'inherit', outline: 'none', padding: 0,
+          }}
+        />
+      ) : label}
+      {closable && !editing && (
+        <span
+          role="button"
+          tabIndex={0}
+          className="tm-tab-x"
+          title="Закрыть"
+          onClick={(e) => { e.stopPropagation(); onClose() }}
+          onKeyDown={(e) => { if (e.key === 'Enter') { e.stopPropagation(); onClose() } }}
+        >
+          ×
+        </span>
+      )}
+    </div>
+  )
+}
 
 // Человечная вариация картинки: лёгкий рекадр/фильтр/пересохранение — как
 // естественный ре-шер, а не «невидимый шум». Меняет отпечаток, выглядит живо.
@@ -244,6 +321,7 @@ function Operation({
   })
   const [dialogs, setDialogs] = useState(saved.dialogs || [{ steps: [newStep(null)] }])
   const pollRef = useRef(null)
+  const latestData = useRef(null)
 
   // Сохраняем черновик на сервер (debounce). Картинки хранятся как серверные URL
   // (загружаются при выборе), поэтому тело маленькое — без квоты и потери данных.
@@ -251,12 +329,19 @@ function Operation({
     const data = {
       profileUuid, posts, commentText, perComments, tasks, post2, entries, post3, dialogs, opImage, opImageName,
     }
+    latestData.current = data
     clearTimeout(draftSaveTimer.current)
     draftSaveTimer.current = setTimeout(() => {
       axios.put(`${API_BASE}/api/drafts/${draftKey}`, data).catch(() => {})
     }, 700)
     return () => clearTimeout(draftSaveTimer.current)
   }, [draftKey, profileUuid, posts, commentText, perComments, tasks, post2, entries, post3, dialogs, opImage, opImageName])
+
+  // При размонтировании (например, переключили оффер) — дописываем последнее
+  // состояние сразу, чтобы не потерять правки, не успевшие уйти по debounce.
+  useEffect(() => () => {
+    if (latestData.current) axios.put(`${API_BASE}/api/drafts/${draftKey}`, latestData.current).catch(() => {})
+  }, [draftKey])
 
   // Метка занятости профиля: «занят до 14:32» (уже идёт) или «занят с 15:10».
   const profileBusy = (uuid) => {
@@ -1102,36 +1187,31 @@ function App() {
   // iframe). drafts = карта { 'tabs': {...}, 'op:<m>:<id>': {...} }. Пока не
   // загрузились — не монтируем операции (иначе они стартанут с пустого состояния).
   const [drafts, setDrafts] = useState(null)
-  const [tabs, setTabs] = useState({ 1: [{ id: 1 }], 2: [{ id: 1 }], 3: [{ id: 1 }] })
-  const [activeId, setActiveId] = useState({ 1: 1, 2: 1, 3: 1 })
-  const nextId = useRef({ 1: 2, 2: 2, 3: 2 })
-  const tabsSaveTimer = useRef(null)
-  const tabsHydrated = useRef(false)
+  // Двухуровневая структура вкладок: офферы, внутри — операции. Хранится на сервере.
+  const [struct, setStruct] = useState(defaultOffers)
+  const structSaveTimer = useRef(null)
+  const structHydrated = useRef(false)
 
   useEffect(() => {
     let alive = true
     axios.get(`${API_BASE}/api/drafts`).then(({ data }) => {
       if (!alive) return
       const items = (data && data.items) || {}
-      const t = items.tabs
-      if (t && t.tabs && t.activeId && t.nextId) {
-        setTabs(t.tabs); setActiveId(t.activeId); nextId.current = t.nextId
-      }
-      tabsHydrated.current = true
+      setStruct(migrateStruct(items.tabs))
+      structHydrated.current = true
       setDrafts(items)
-    }).catch(() => { tabsHydrated.current = true; setDrafts({}) })
+    }).catch(() => { structHydrated.current = true; setDrafts({}) })
     return () => { alive = false }
   }, [])
 
   useEffect(() => {
-    if (!tabsHydrated.current) return undefined // не перетираем серверный набор до загрузки
-    clearTimeout(tabsSaveTimer.current)
-    const payload = { tabs, activeId, nextId: nextId.current }
-    tabsSaveTimer.current = setTimeout(() => {
-      axios.put(`${API_BASE}/api/drafts/tabs`, payload).catch(() => {})
+    if (!structHydrated.current) return undefined // не перетираем серверную структуру до загрузки
+    clearTimeout(structSaveTimer.current)
+    structSaveTimer.current = setTimeout(() => {
+      axios.put(`${API_BASE}/api/drafts/tabs`, struct).catch(() => {})
     }, 500)
-    return () => clearTimeout(tabsSaveTimer.current)
-  }, [tabs, activeId])
+    return () => clearTimeout(structSaveTimer.current)
+  }, [struct])
 
   // Запоминаем активную вкладку режима, чтобы не слетала при обновлении страницы.
   useEffect(() => {
@@ -1194,48 +1274,95 @@ function App() {
     return () => { active = false; clearInterval(id) }
   }, [authReady])
 
-  const addTab = (m) => {
-    if (tabs[m].length >= MAX_OPS) return
-    const id = nextId.current[m]
-    nextId.current[m] += 1
-    setTabs((prev) => ({ ...prev, [m]: [...prev[m], { id }] }))
-    setActiveId((prev) => ({ ...prev, [m]: id }))
+  const activeOfferObj = (m) => struct.offers[m].find((o) => o.id === struct.activeOffer[m]) || struct.offers[m][0]
+
+  // ---- Офферы ----
+  const addOffer = (m) => setStruct((prev) => {
+    const id = prev.nextOfferId[m]; const opId = prev.nextOpId[m]
+    return {
+      ...prev,
+      offers: { ...prev.offers, [m]: [...prev.offers[m], { id, name: `Оффер ${prev.offers[m].length + 1}`, ops: [{ id: opId, name: 'Операция 1' }], activeOp: opId }] },
+      activeOffer: { ...prev.activeOffer, [m]: id },
+      nextOfferId: { ...prev.nextOfferId, [m]: id + 1 },
+      nextOpId: { ...prev.nextOpId, [m]: opId + 1 },
+    }
+  })
+  const activateOffer = (m, offerId) => setStruct((prev) => ({ ...prev, activeOffer: { ...prev.activeOffer, [m]: offerId } }))
+  const renameOffer = (m, offerId, name) => setStruct((prev) => ({
+    ...prev, offers: { ...prev.offers, [m]: prev.offers[m].map((o) => (o.id === offerId ? { ...o, name } : o)) },
+  }))
+  const closeOffer = (m, offerId) => {
+    const list = struct.offers[m]
+    if (list.length <= 1) return
+    const closed = list.find((o) => o.id === offerId)
+    if (closed) {
+      for (const op of closed.ops) axios.delete(`${API_BASE}/api/drafts/op:${m}:${op.id}`).catch(() => {})
+      setDrafts((prev) => { if (!prev) return prev; const n = { ...prev }; for (const op of closed.ops) delete n[`op:${m}:${op.id}`]; return n })
+    }
+    setStruct((prev) => {
+      const l = prev.offers[m]; const idx = l.findIndex((o) => o.id === offerId); const next = l.filter((o) => o.id !== offerId)
+      if (!next.length) return prev
+      const activeOffer = prev.activeOffer[m] === offerId
+        ? { ...prev.activeOffer, [m]: (next[idx] || next[next.length - 1]).id } : prev.activeOffer
+      return { ...prev, offers: { ...prev.offers, [m]: next }, activeOffer }
+    })
   }
 
-  // Дублировать активную операцию: копируем все её поля (посты/фейки/тексты/
-  // картинки/диалоги), но БЕЗ логов и результатов (tasks). Пишем в localStorage
-  // новой вкладки ДО её монтирования — тогда новая Operation прочитает копию.
-  const duplicateTab = async (m) => {
-    if (tabs[m].length >= MAX_OPS) return
-    const srcKey = `op:${m}:${activeId[m]}`
-    // Берём АКТУАЛЬНУЮ версию исходной операции с сервера (там последнее сохранение),
-    // иначе — из локального кэша черновиков.
+  // ---- Операции (внутри активного оффера) ----
+  const addOp = (m) => setStruct((prev) => {
+    const opId = prev.nextOpId[m]; const offerId = prev.activeOffer[m]
+    return {
+      ...prev,
+      offers: { ...prev.offers, [m]: prev.offers[m].map((o) => (o.id === offerId ? { ...o, ops: [...o.ops, { id: opId, name: `Операция ${o.ops.length + 1}` }], activeOp: opId } : o)) },
+      nextOpId: { ...prev.nextOpId, [m]: opId + 1 },
+    }
+  })
+  const activateOp = (m, opId) => setStruct((prev) => {
+    const offerId = prev.activeOffer[m]
+    return { ...prev, offers: { ...prev.offers, [m]: prev.offers[m].map((o) => (o.id === offerId ? { ...o, activeOp: opId } : o)) } }
+  })
+  const renameOp = (m, opId, name) => setStruct((prev) => {
+    const offerId = prev.activeOffer[m]
+    return { ...prev, offers: { ...prev.offers, [m]: prev.offers[m].map((o) => (o.id === offerId ? { ...o, ops: o.ops.map((op) => (op.id === opId ? { ...op, name } : op)) } : o)) } }
+  })
+  const closeOp = (m, opId) => {
+    const offerId = struct.activeOffer[m]
+    const offer = struct.offers[m].find((o) => o.id === offerId)
+    if (!offer || offer.ops.length <= 1) return
+    axios.delete(`${API_BASE}/api/drafts/op:${m}:${opId}`).catch(() => {})
+    setDrafts((prev) => { if (!prev) return prev; const n = { ...prev }; delete n[`op:${m}:${opId}`]; return n })
+    setStruct((prev) => ({
+      ...prev,
+      offers: { ...prev.offers, [m]: prev.offers[m].map((o) => {
+        if (o.id !== offerId) return o
+        const idx = o.ops.findIndex((x) => x.id === opId); const next = o.ops.filter((x) => x.id !== opId)
+        const activeOp = o.activeOp === opId ? (next[idx] || next[next.length - 1]).id : o.activeOp
+        return { ...o, ops: next, activeOp }
+      }) },
+    }))
+  }
+  // Дублировать активную операцию: копируем все её поля/картинки, но БЕЗ логов.
+  const duplicateOp = async (m) => {
+    const offerId = struct.activeOffer[m]
+    const offer = struct.offers[m].find((o) => o.id === offerId)
+    if (!offer) return
+    const srcOpId = offer.activeOp
+    const srcKey = `op:${m}:${srcOpId}`
     let data = (drafts && drafts[srcKey]) || {}
     try {
       const { data: r } = await axios.get(`${API_BASE}/api/drafts`)
       if (r && r.items && r.items[srcKey]) data = r.items[srcKey]
-    } catch { /* оставим из кэша */ }
-    const id = nextId.current[m]
-    nextId.current[m] += 1
-    const copy = { ...data, tasks: [] } // копируем поля/картинки, но БЕЗ логов
-    try { await axios.put(`${API_BASE}/api/drafts/op:${m}:${id}`, copy) } catch { /* пропустим */ }
-    setDrafts((prev) => ({ ...(prev || {}), [`op:${m}:${id}`]: copy }))
-    setTabs((prev) => ({ ...prev, [m]: [...prev[m], { id }] }))
-    setActiveId((prev) => ({ ...prev, [m]: id }))
-  }
-
-  const closeTab = (m, id) => {
-    const list = tabs[m]
-    const idx = list.findIndex((x) => x.id === id)
-    const next = list.filter((x) => x.id !== id)
-    if (!next.length) return
-    setTabs((prev) => ({ ...prev, [m]: next }))
-    if (activeId[m] === id) {
-      const pick = (next[idx] || next[next.length - 1]).id
-      setActiveId((prev) => ({ ...prev, [m]: pick }))
-    }
-    axios.delete(`${API_BASE}/api/drafts/op:${m}:${id}`).catch(() => {})
-    setDrafts((prev) => { if (!prev) return prev; const n = { ...prev }; delete n[`op:${m}:${id}`]; return n })
+    } catch { /* из кэша */ }
+    const newOpId = struct.nextOpId[m]
+    const copy = { ...data, tasks: [] }
+    try { await axios.put(`${API_BASE}/api/drafts/op:${m}:${newOpId}`, copy) } catch { /* пропустим */ }
+    setDrafts((prev) => ({ ...(prev || {}), [`op:${m}:${newOpId}`]: copy }))
+    const srcName = (offer.ops.find((x) => x.id === srcOpId) || {}).name || 'Операция'
+    setStruct((prev) => ({
+      ...prev,
+      offers: { ...prev.offers, [m]: prev.offers[m].map((o) => (o.id === offerId ? { ...o, ops: [...o.ops, { id: newOpId, name: `${srcName} (копия)` }], activeOp: newOpId } : o)) },
+      nextOpId: { ...prev.nextOpId, [m]: Math.max(prev.nextOpId[m], newOpId + 1) },
+    }))
   }
 
   const MODES = [
@@ -1287,79 +1414,95 @@ function App() {
         </div>
       </div>
 
-      {/* Под каждым режимом — свой набор операций (обе ветки смонтированы) */}
-      {MODES.map(({ m }) => (
-        <div key={m} style={{ display: activeMode === m ? 'block' : 'none' }}>
-          <div className="tm-tabs">
-            {tabs[m].map((t, idx) => (
-              <div
-                key={t.id}
-                role="button"
-                tabIndex={0}
-                className={`tm-tab${t.id === activeId[m] ? ' active' : ''}`}
-                onClick={() => setActiveId((prev) => ({ ...prev, [m]: t.id }))}
-                onKeyDown={(e) => { if (e.key === 'Enter') setActiveId((prev) => ({ ...prev, [m]: t.id })) }}
-              >
-                Операция {idx + 1}
-                {tabs[m].length > 1 && (
-                  <span
-                    role="button"
-                    tabIndex={0}
-                    className="tm-tab-x"
-                    title="Закрыть операцию"
-                    onClick={(e) => { e.stopPropagation(); closeTab(m, t.id) }}
-                    onKeyDown={(e) => { if (e.key === 'Enter') { e.stopPropagation(); closeTab(m, t.id) } }}
-                  >
-                    ×
-                  </span>
-                )}
-              </div>
-            ))}
-            <div style={{ display: 'flex', flexDirection: 'column', gap: '2px', marginLeft: '4px', marginBottom: '2px' }}>
+      {/* Под каждым режимом — офферы (верхний ряд) → операции активного оффера */}
+      {MODES.map(({ m }) => {
+        const offer = activeOfferObj(m)
+        return (
+          <div key={m} style={{ display: activeMode === m ? 'block' : 'none' }}>
+            {/* Офферы */}
+            <div className="tm-tabs">
+              {struct.offers[m].map((o) => (
+                <EditableTab
+                  key={o.id}
+                  label={o.name}
+                  active={o.id === struct.activeOffer[m]}
+                  onActivate={() => activateOffer(m, o.id)}
+                  onRename={(n) => renameOffer(m, o.id, n)}
+                  onClose={() => closeOffer(m, o.id)}
+                  closable={struct.offers[m].length > 1}
+                />
+              ))}
               <button
                 type="button"
                 className="tm-add-tab"
-                onClick={() => addTab(m)}
-                disabled={tabs[m].length >= MAX_OPS}
-                title={tabs[m].length >= MAX_OPS ? `Максимум ${MAX_OPS} операций` : 'Новая операция (пустая)'}
-                style={{ width: '48px', height: '17px', fontSize: '15px', lineHeight: 1, padding: 0 }}
+                onClick={() => addOffer(m)}
+                title="Новый оффер"
+                style={{ width: '44px', height: '36px', fontSize: '18px', marginLeft: '4px', marginBottom: '2px' }}
               >
                 +
               </button>
-              <button
-                type="button"
-                className="tm-add-tab"
-                onClick={() => duplicateTab(m)}
-                disabled={tabs[m].length >= MAX_OPS}
-                title={tabs[m].length >= MAX_OPS ? `Максимум ${MAX_OPS} операций` : 'Дублировать операцию (все поля, без логов)'}
-                style={{ width: '48px', height: '17px', fontSize: '13px', lineHeight: 1, padding: 0 }}
-              >
-                ⧉
-              </button>
+              <span className="tm-muted" style={{ alignSelf: 'center', marginLeft: '8px', fontSize: '12px' }}>
+                Офферов: {struct.offers[m].length}
+              </span>
             </div>
-            <span className="tm-muted" style={{ alignSelf: 'center', marginLeft: '8px', fontSize: '12px' }}>
-              Операций: {tabs[m].length}
-            </span>
-          </div>
 
-          {tabs[m].map((t) => (
-            <div key={t.id} style={{ display: activeId[m] === t.id ? 'block' : 'none' }}>
-              <Operation
-                mode={m}
-                opId={t.id}
-                initial={drafts[`op:${m}:${t.id}`] || {}}
-                profiles={profiles}
-                loadingProfiles={loadingProfiles}
-                profilesError={profilesError}
-                loadProfiles={loadProfiles}
-                busy={busy}
-                busyAt={busyAt}
-                now={now}
-              />
+            {/* Операции активного оффера */}
+            <div className="tm-tabs" style={{ marginTop: '6px' }}>
+              {offer.ops.map((op) => (
+                <EditableTab
+                  key={op.id}
+                  label={op.name}
+                  active={op.id === offer.activeOp}
+                  onActivate={() => activateOp(m, op.id)}
+                  onRename={(n) => renameOp(m, op.id, n)}
+                  onClose={() => closeOp(m, op.id)}
+                  closable={offer.ops.length > 1}
+                />
+              ))}
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '2px', marginLeft: '4px', marginBottom: '2px' }}>
+                <button
+                  type="button"
+                  className="tm-add-tab"
+                  onClick={() => addOp(m)}
+                  title="Новая операция (пустая)"
+                  style={{ width: '48px', height: '17px', fontSize: '15px', lineHeight: 1, padding: 0 }}
+                >
+                  +
+                </button>
+                <button
+                  type="button"
+                  className="tm-add-tab"
+                  onClick={() => duplicateOp(m)}
+                  title="Дублировать операцию (все поля, без логов)"
+                  style={{ width: '48px', height: '17px', fontSize: '13px', lineHeight: 1, padding: 0 }}
+                >
+                  ⧉
+                </button>
+              </div>
+              <span className="tm-muted" style={{ alignSelf: 'center', marginLeft: '8px', fontSize: '12px' }}>
+                Операций: {offer.ops.length}
+              </span>
             </div>
-          ))}
-        </div>
-      ))}
+
+            {offer.ops.map((op) => (
+              <div key={`${offer.id}:${op.id}`} style={{ display: offer.activeOp === op.id ? 'block' : 'none' }}>
+                <Operation
+                  mode={m}
+                  opId={op.id}
+                  initial={drafts[`op:${m}:${op.id}`] || {}}
+                  profiles={profiles}
+                  loadingProfiles={loadingProfiles}
+                  profilesError={profilesError}
+                  loadProfiles={loadProfiles}
+                  busy={busy}
+                  busyAt={busyAt}
+                  now={now}
+                />
+              </div>
+            ))}
+          </div>
+        )
+      })}
 
       {/* Вкладка «История и прогресс» */}
       <div style={{ display: activeMode === 'history' ? 'block' : 'none' }}>
