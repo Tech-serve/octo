@@ -226,6 +226,25 @@ async function ensureTextInField(page, box, text, log, refind) {
     // eslint-disable-next-line no-await-in-loop
     if (((await readField(field)) || '').includes(want)) return field;
   }
+
+  // Посимвольная печать не идёт (keydown не долетают до composer) — прямая вставка
+  // через CDP insertText в сфокусированное поле. Она кладёт текст и корректно
+  // триггерит input-событие, которое FB (React) подхватывает.
+  log.info('[FB Bot] Печать посимвольно не идёт — пробую прямую вставку (insertText)...');
+  try { await field.focus(); } catch { /* ignore */ }
+  await humanClick(page, field).catch(() => {});
+  await page.keyboard.press('Control+A').catch(() => {});
+  await page.keyboard.press('Backspace').catch(() => {});
+  await sleep(rand(150, 300));
+  await page.keyboard.insertText(text).catch(() => {});
+  await sleep(rand(300, 600));
+  if (((await readField(field)) || '').includes(want)) { log.info('[FB Bot] Текст вставлен напрямую (insertText).'); return field; }
+
+  // Ещё резерв: печать через сам элемент — Playwright сам фокусирует его перед вводом.
+  try { await field.type(text, { delay: 25 }); } catch { /* ignore */ }
+  await sleep(rand(300, 600));
+  if (((await readField(field)) || '').includes(want)) { log.info('[FB Bot] Текст введён через элемент.'); return field; }
+
   log.info('[FB Bot] Не удалось надёжно ввести текст — отправляю как есть.');
   return field;
 }
