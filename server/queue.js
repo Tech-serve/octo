@@ -172,7 +172,7 @@ function isRetryable(msg) {
   if (!msg) return false;
   if (/не подтверждён|придержал/i.test(msg)) return false;
   if (/превысила лимит/i.test(msg)) return false;
-  return /closed|target page|context or browser|econnreset|socket hang up|timeout \d+ms exceeded|page\.goto|err_|не найден комментарий для ответа|не открылось поле ответа|не найдена кнопка|already started|octo отказал|ws_endpoint/i.test(msg);
+  return /closed|target page|context or browser|econnreset|socket hang up|timeout \d+ms exceeded|page\.goto|err_|не найден комментарий для ответа|не открылось поле ответа|не найдена кнопка|не открылся|не загрузил|already started|octo отказал|ws_endpoint/i.test(msg);
 }
 
 async function runTask(task) {

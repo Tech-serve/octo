@@ -201,6 +201,53 @@ async function detectBlock(page) {
   return null;
 }
 
+// Прочитать, ЧТО реально показал FB, когда поле/коммент не нашлись, и вернуть
+// правдивую причину вместо общего «поле не найдено». `hard` = причина
+// однозначная (по тексту FB) — можно валить сразу после открытия поста; иначе
+// это эвристика (нет статьи/композера), проверять только после полной загрузки.
+async function diagnosePostProblem(page) {
+  const url = page.url();
+  const info = await page.evaluate(() => {
+    const t = (document.body?.innerText || '').toLowerCase().replace(/\s+/g, ' ');
+    return {
+      t,
+      hasArticle: !!document.querySelector('div[role="article"]'),
+      hasComposer: !!document.querySelector('[contenteditable="true"], [role="textbox"]'),
+    };
+  }).catch(() => ({ t: '', hasArticle: false, hasComposer: false }));
+  const t = info.t;
+  const has = (arr) => arr.some((p) => t.includes(p));
+
+  const gone = [
+    "this content isn't available", 'this content isnt available', "content isn't available right now",
+    "this page isn't available", 'this page isnt available', 'no longer available',
+    'the link you followed may be broken', 'page may have been removed', "sorry, this content isn",
+    'этот контент сейчас недоступен', 'контент недоступен', 'эта страница недоступна',
+    'страница недоступна', 'публикация недоступна', 'материал недоступен', 'больше недоступ',
+    'ссылка, по которой вы перешли', 'цей вміст зараз недоступний', 'ця сторінка недоступна',
+    'este contenido no está disponible', 'esta página no está disponible', 'ya no está disponible',
+    'este conteúdo não está disponível', 'esta página não está disponível', 'não está mais disponível',
+    'dieser inhalt ist zurzeit nicht verfügbar', 'diese seite ist nicht verfügbar', 'nicht mehr verfügbar',
+    "ce contenu n'est pas disponible", "cette page n'est pas disponible", "n'est plus disponible",
+    'questo contenuto non è disponibile', 'questa pagina non è disponibile',
+    'ta treść jest obecnie niedostępna', 'ta strona jest niedostępna',
+    'bu içerik şu anda kullanılamıyor', 'bu sayfa kullanılamıyor',
+  ];
+  if (has(gone)) return { reason: 'пост недоступен или удалён (FB: «контент недоступен»)', hard: true };
+
+  const login = [
+    'log in to facebook', 'log into facebook', 'you must log in', 'log in or sign up',
+    'войдите на facebook', 'вход на facebook', 'войти в аккаунт', 'увійдіть на facebook',
+    'inicia sesión en facebook', 'entrar no facebook', 'melde dich bei facebook an',
+    "connecte-toi à facebook", 'accedi a facebook',
+  ];
+  if (/\/login/i.test(url) || has(login)) return { reason: 'требуется вход — сессия FB не авторизована (разлогин)', hard: true };
+
+  if (info.hasArticle && !info.hasComposer) return { reason: 'комментарии к посту отключены (поля ввода нет)', hard: false };
+  if (!info.hasArticle) return { reason: 'пост не открылся/не загрузился (на странице нет публикации)', hard: false };
+  return { reason: '', hard: false };
+}
+
 // Подпись текущей сортировки комментов (её кликаем, чтобы открыть меню) и пункт
 // «Все комментарии» — мультиязычно. По умолчанию FB ставит «Самые актуальные»,
 // и свежий родительский коммент туда может не попасть.
@@ -594,6 +641,13 @@ async function leaveFacebookComment(payload, log, handle = {}) {
     if (block) {
       throw new Error(`Действие прервано: ${block}. Требуется ручное вмешательство.`);
     }
+    // Пост удалён/недоступен/требует логин — валим сразу с ПРАВДИВОЙ причиной,
+    // не тратя время на поиск поля (которого и не будет).
+    const early = await diagnosePostProblem(page);
+    if (early.hard) {
+      log.info(`[FB Bot] ${early.reason}.`);
+      throw new Error(`${early.reason.charAt(0).toUpperCase()}${early.reason.slice(1)}.`);
+    }
 
     // Пост-пермалинк часто открывается в модальном окне. Если оно есть — курсор
     // и скролл должны быть ВНУТРИ него, иначе крутим фон, а комментарии не грузятся.
@@ -620,7 +674,11 @@ async function leaveFacebookComment(payload, log, handle = {}) {
       // показаться в «Самые актуальные».
       await switchToAllComments(page, log);
       const target = await findCommentByText(page, replyToText, config.selectorTimeout);
-      if (!target) throw new Error(`Не найден комментарий для ответа: "${replyToText.slice(0, 40)}…"`);
+      if (!target) {
+        const why = await diagnosePostProblem(page);
+        if (why.reason) throw new Error(`${why.reason.charAt(0).toUpperCase()}${why.reason.slice(1)} — ответ поставить не на что.`);
+        throw new Error(`Не найден комментарий для ответа: "${replyToText.slice(0, 40)}…" (родитель ещё не опубликован или скрыт сортировкой).`);
+      }
       await target.scrollIntoViewIfNeeded().catch(() => {});
       await sleep(rand(500, 1200));
       ensureLive();
@@ -660,7 +718,9 @@ async function leaveFacebookComment(payload, log, handle = {}) {
           e.accountStatus = st;
           throw e;
         }
-        throw new Error('Поле для комментария не найдено (возможно, изменилась вёрстка FB или комментарии отключены)');
+        const why = await diagnosePostProblem(page);
+        if (why.reason) throw new Error(`${why.reason.charAt(0).toUpperCase()}${why.reason.slice(1)}.`);
+        throw new Error('Поле для комментария не найдено (возможно, изменилась вёрстка FB или комментарии отключены).');
       }
     }
 
