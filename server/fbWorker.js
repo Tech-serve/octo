@@ -442,11 +442,24 @@ async function findCommentByText(page, text, timeoutMs) {
         const isRepl = /\d/.test(t) && replyWords.some((r) => t.includes(r));
         if (isMore || isRepl) { b.scrollIntoView({ block: 'center' }); b.click(); return; }
       }
+      // Ничего не кликнули — листаем ПРОГРАММНО именно скроллируемый контейнер
+      // модалки, а не колесом мыши (колесо крутит ленту под курсором, если он
+      // промахнулся мимо модалки — отсюда и «листает ленту, а не пост»).
+      const scroller = (() => {
+        let best = null; let bestH = 0;
+        for (const el of root.querySelectorAll('div')) {
+          const st = getComputedStyle(el);
+          if ((st.overflowY === 'auto' || st.overflowY === 'scroll') && el.scrollHeight > el.clientHeight + 40) {
+            if (el.scrollHeight > bestH) { best = el; bestH = el.scrollHeight; }
+          }
+        }
+        return best;
+      })();
+      if (scroller) scroller.scrollBy(0, Math.round(scroller.clientHeight * 0.85));
+      else if (root !== document && root.scrollBy) root.scrollBy(0, 600);
     }).catch(() => {});
     // eslint-disable-next-line no-await-in-loop
-    await humanScroll(page, { bursts: 1 });
-    // eslint-disable-next-line no-await-in-loop
-    await page.waitForTimeout(800);
+    await page.waitForTimeout(900);
   }
   return null;
 }
