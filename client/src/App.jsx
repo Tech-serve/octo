@@ -213,6 +213,8 @@ function Operation({
   const [tasks, setTasks] = useState(saved.tasks || [])
   const [error, setError] = useState('')
   const [submitting, setSubmitting] = useState(false)
+  // Защита от двойного клика по «Повторить/Продолжить»: id/dialogId в работе.
+  const [retrying, setRetrying] = useState({})
   const [search, setSearch] = useState('')
   // Режим 2: один пост -> много фейков (каждый со своим тегом/фейком/комментом/картинкой).
   const [post2, setPost2] = useState(saved.post2 || '')
@@ -513,29 +515,47 @@ function Operation({
   const opResumable = (dialogId) => !!(dialogId && opDialogState[dialogId]
     && opDialogState[dialogId].hasError && !opDialogState[dialogId].hasPending)
 
+  const toPanelTask = (t) => ({
+    id: t.id, status: t.status, postUrl: t.postUrl, profileUuid: t.profileUuid,
+    scheduledAt: t.scheduledAt, commentText: t.commentText, imageUrl: t.imageUrl, dialogId: t.dialogId,
+  })
+
   const opContinueDialog = async (dialogId) => {
+    if (retrying[dialogId]) return
+    setRetrying((r) => ({ ...r, [dialogId]: true }))
     try {
       const { data } = await axios.post(`${API_BASE}/api/dialog/continue`, { dialogId })
-      // Влить пересозданные шаги в панель, чтобы поллинг подхватил прогресс.
-      const fresh = (data.created || []).map((t) => ({
-        id: t.id, status: t.status, postUrl: t.postUrl, profileUuid: t.profileUuid,
-        scheduledAt: t.scheduledAt, commentText: t.commentText, imageUrl: t.imageUrl, dialogId: t.dialogId,
-      }))
-      setTasks((prev) => [...prev.filter((t) => t.dialogId !== dialogId || t.status === 'done'), ...fresh])
-    } catch (e) { setError(`Ошибка: ${e.response?.data?.error || e.message}`) }
+      const fresh = (data.created || []).map(toPanelTask)
+      // Заменяем упавшие/отменённые шаги диалога СВЕЖИМИ на их же местах — без
+      // перескока: вставляем на позицию первого не-DONE шага, остальные не-DONE убираем.
+      setTasks((prev) => {
+        let inserted = false
+        const out = []
+        for (const t of prev) {
+          if (t.dialogId === dialogId && t.status !== 'done') {
+            if (!inserted) { out.push(...fresh); inserted = true }
+            continue
+          }
+          out.push(t)
+        }
+        if (!inserted) out.push(...fresh)
+        return out
+      })
+    } catch (e) { setError(`Ошибка: ${e.response?.data?.error || e.message}`) } finally {
+      setRetrying((r) => { const n = { ...r }; delete n[dialogId]; return n })
+    }
   }
   const opRetryTask = async (id) => {
+    if (retrying[id]) return
+    setRetrying((r) => ({ ...r, [id]: true }))
     try {
       const { data } = await axios.post(`${API_BASE}/api/tasks/${id}/retry`)
       const t = data.task
-      if (t) {
-        const nt = {
-          id: t.id, status: t.status, postUrl: t.postUrl, profileUuid: t.profileUuid,
-          scheduledAt: t.scheduledAt, commentText: t.commentText, imageUrl: t.imageUrl, dialogId: t.dialogId,
-        }
-        setTasks((prev) => [...prev.filter((x) => x.id !== id), nt])
-      }
-    } catch (e) { setError(`Ошибка: ${e.response?.data?.error || e.message}`) }
+      // Заменяем задачу НА ТОМ ЖЕ МЕСТЕ (новый id), чтобы карточка не прыгала.
+      if (t) setTasks((prev) => prev.map((x) => (x.id === id ? toPanelTask(t) : x)))
+    } catch (e) { setError(`Ошибка: ${e.response?.data?.error || e.message}`) } finally {
+      setRetrying((r) => { const n = { ...r }; delete n[id]; return n })
+    }
   }
 
   // Селект «тег + фейк» с фильтром по строке поиска (общий для режимов 2/3).
@@ -890,6 +910,7 @@ function Operation({
                   className="tm-btn tm-btn-outline"
                   style={{ fontSize: '12px', padding: '2px 10px' }}
                   title="Пересоздать этот шаг и все последующие реплики диалога и доиграть ветку"
+                  disabled={!!retrying[task.dialogId]}
                   onClick={() => opContinueDialog(task.dialogId)}
                 >
                   ▶ Продолжить диалог
@@ -903,6 +924,7 @@ function Operation({
                   className="tm-btn tm-btn-outline"
                   style={{ fontSize: '12px', padding: '2px 10px' }}
                   title="Пересоздать эту задачу и выполнить заново"
+                  disabled={!!retrying[task.id]}
                   onClick={() => opRetryTask(task.id)}
                 >
                   ↻ Повторить ещё раз
@@ -926,6 +948,7 @@ function Operation({
 // ─────────────────────────────────────────────────────────────────────────
 function History({ profiles }) {
   const [tasks, setTasks] = useState([])
+  const [retrying, setRetrying] = useState({})
   const nameOf = (uuid) => {
     const p = profiles.find((x) => x.uuid === uuid)
     return p ? p.title : (uuid ? `${uuid.slice(0, 8)}…` : '—')
@@ -966,10 +989,18 @@ function History({ profiles }) {
   const resumable = (dialogId) => !!(dialogId && dialogState[dialogId] && dialogState[dialogId].hasError && !dialogState[dialogId].hasPending)
 
   const continueDialog = async (dialogId) => {
-    try { await axios.post(`${API_BASE}/api/dialog/continue`, { dialogId }) } catch { /* пропустим */ }
+    if (retrying[dialogId]) return
+    setRetrying((r) => ({ ...r, [dialogId]: true }))
+    try { await axios.post(`${API_BASE}/api/dialog/continue`, { dialogId }) } catch { /* пропустим */ } finally {
+      setTimeout(() => setRetrying((r) => { const n = { ...r }; delete n[dialogId]; return n }), 2500)
+    }
   }
   const retryTask = async (id) => {
-    try { await axios.post(`${API_BASE}/api/tasks/${id}/retry`) } catch { /* пропустим */ }
+    if (retrying[id]) return
+    setRetrying((r) => ({ ...r, [id]: true }))
+    try { await axios.post(`${API_BASE}/api/tasks/${id}/retry`) } catch { /* пропустим */ } finally {
+      setTimeout(() => setRetrying((r) => { const n = { ...r }; delete n[id]; return n }), 2500)
+    }
   }
 
   return (
@@ -997,6 +1028,7 @@ function History({ profiles }) {
                   className="tm-btn tm-btn-outline"
                   style={{ fontSize: '12px', padding: '2px 10px' }}
                   title="Пересоздать этот шаг и все последующие реплики диалога и доиграть ветку"
+                  disabled={!!retrying[t.dialogId]}
                   onClick={() => continueDialog(t.dialogId)}
                 >
                   ▶ Продолжить диалог
@@ -1010,6 +1042,7 @@ function History({ profiles }) {
                   className="tm-btn tm-btn-outline"
                   style={{ fontSize: '12px', padding: '2px 10px' }}
                   title="Пересоздать эту задачу и выполнить заново"
+                  disabled={!!retrying[t.id]}
                   onClick={() => retryTask(t.id)}
                 >
                   ↻ Повторить ещё раз
