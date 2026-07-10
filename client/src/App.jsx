@@ -1308,6 +1308,37 @@ function App() {
     })
   }
 
+  // Дублировать активный оффер вместе со ВСЕМИ его операциями (поля/картинки), но
+  // БЕЗ логов. Каждой операции — новый id и своя копия черновика на сервере.
+  const duplicateOffer = async (m) => {
+    const src = struct.offers[m].find((o) => o.id === struct.activeOffer[m])
+    if (!src) return
+    let items = drafts || {}
+    try {
+      const { data: r } = await axios.get(`${API_BASE}/api/drafts`)
+      if (r && r.items) items = r.items
+    } catch { /* из кэша */ }
+    const newOfferId = struct.nextOfferId[m]
+    let nextOp = struct.nextOpId[m]
+    const newOps = []
+    const cache = {}
+    for (const op of src.ops) {
+      const newOpId = nextOp; nextOp += 1
+      const copy = { ...(items[`op:${m}:${op.id}`] || {}), tasks: [] }
+      try { await axios.put(`${API_BASE}/api/drafts/op:${m}:${newOpId}`, copy) } catch { /* пропустим */ }
+      cache[`op:${m}:${newOpId}`] = copy
+      newOps.push({ id: newOpId, name: op.name })
+    }
+    setDrafts((prev) => ({ ...(prev || {}), ...cache }))
+    setStruct((prev) => ({
+      ...prev,
+      offers: { ...prev.offers, [m]: [...prev.offers[m], { id: newOfferId, name: `${src.name} (копия)`, ops: newOps, activeOp: newOps.length ? newOps[0].id : prev.nextOpId[m] }] },
+      activeOffer: { ...prev.activeOffer, [m]: newOfferId },
+      nextOfferId: { ...prev.nextOfferId, [m]: newOfferId + 1 },
+      nextOpId: { ...prev.nextOpId, [m]: Math.max(prev.nextOpId[m], nextOp) },
+    }))
+  }
+
   // ---- Операции (внутри активного оффера) ----
   const addOp = (m) => setStruct((prev) => {
     const opId = prev.nextOpId[m]; const offerId = prev.activeOffer[m]
@@ -1432,18 +1463,26 @@ function App() {
                   closable={struct.offers[m].length > 1}
                 />
               ))}
-              <button
-                type="button"
-                className="tm-add-tab"
-                onClick={() => addOffer(m)}
-                title="Новый оффер"
-                style={{ width: '44px', height: '36px', fontSize: '18px', marginLeft: '4px', marginBottom: '2px' }}
-              >
-                +
-              </button>
-              <span className="tm-muted" style={{ alignSelf: 'center', marginLeft: '8px', fontSize: '12px' }}>
-                Офферов: {struct.offers[m].length}
-              </span>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '2px', marginLeft: '4px', marginBottom: '2px' }}>
+                <button
+                  type="button"
+                  className="tm-add-tab"
+                  onClick={() => addOffer(m)}
+                  title="Новый оффер (пустой)"
+                  style={{ width: '48px', height: '17px', fontSize: '15px', lineHeight: 1, padding: 0 }}
+                >
+                  +
+                </button>
+                <button
+                  type="button"
+                  className="tm-add-tab"
+                  onClick={() => duplicateOffer(m)}
+                  title="Дублировать оффер (все операции, без логов)"
+                  style={{ width: '48px', height: '17px', fontSize: '13px', lineHeight: 1, padding: 0 }}
+                >
+                  ⧉
+                </button>
+              </div>
             </div>
 
             {/* Операции активного оффера */}
@@ -1479,9 +1518,6 @@ function App() {
                   ⧉
                 </button>
               </div>
-              <span className="tm-muted" style={{ alignSelf: 'center', marginLeft: '8px', fontSize: '12px' }}>
-                Операций: {offer.ops.length}
-              </span>
             </div>
 
             {offer.ops.map((op) => (
