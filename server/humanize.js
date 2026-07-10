@@ -205,8 +205,10 @@ async function humanScroll(page, opts = {}) {
       await sleep(rand(250, 650));
     }
 
-    // Изредка слегка водим мышью во время чтения (без кликов).
-    if (Math.random() < p.fidget * 0.5) await idleMouse(page);
+    // Изредка слегка водим мышью во время чтения (без кликов). В режиме поиска
+    // коммента в модалке это ОТКЛЮЧАЕМ (noIdle) — иначе курсор уходит из модалки
+    // и колесо начинает крутить ленту за постом.
+    if (!opts.noIdle && Math.random() < p.fidget * 0.5) await idleMouse(page);
   }
 }
 
