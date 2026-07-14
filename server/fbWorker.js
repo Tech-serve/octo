@@ -743,6 +743,21 @@ async function verifyCommentPosted(page, text, log, timeoutMs = 16000) {
   return false;
 }
 
+// Тосты FB об УСПЕШНОЙ отправке/публикации коммента (мультиязычно). Если FB это
+// показал — коммент опубликован, даже если verify не нашёл его в DOM (мог быть
+// скрыт сортировкой/свёрнут). Считаем успехом → нет ложного «не получилось» и
+// нет риска дубля при «Повторить».
+const SENT_PHRASES = [
+  'комментарий отправлен', 'комментарий опубликован', 'комментарий добавлен', 'ваш комментарий',
+  'коментар надіслано', 'коментар опубліковано', 'коментар додано', 'ваш коментар',
+  'comment was posted', 'comment has been posted', 'comment posted', 'comment was sent',
+  'comment sent', 'comment added', 'your comment',
+  'comentario se publicó', 'comentario publicado', 'comentario se envió', 'tu comentario',
+  'comentário foi publicado', 'comentário publicado', 'comentário enviado', 'seu comentário',
+  'kommentar wurde gepostet', 'kommentar gepostet', 'kommentar gesendet', 'dein kommentar',
+  'commentaire a été publié', 'commentaire publié', 'commentaire envoyé', 'votre commentaire',
+];
+
 async function leaveFacebookComment(payload, log, handle = {}) {
   const {
     profileUuid, postUrl, commentText, imagePath, replyToText,
@@ -942,12 +957,21 @@ async function leaveFacebookComment(payload, log, handle = {}) {
     // очисткой от эмодзи). Не нашли — FB придержал/не опубликовал.
     const kind = replyToText ? 'Ответ' : 'Коммент';
     log.info(`[FB Bot] Проверяю, появился ли ${replyToText ? 'ответ' : 'коммент'} на посте...`);
-    const confirmed = await verifyCommentPosted(page, commentText, log);
+    let confirmed = await verifyCommentPosted(page, commentText, log);
     if (!confirmed) {
       const notice = await readFbNotice(page);
       if (notice) log.info(`[FB Bot] FB показал сообщение: «${notice}»`);
-      const extra = notice ? ` FB показал: «${notice}».` : ' (вероятно, FB придержал как спам).';
-      throw new Error(`${kind} не появился на посте.${extra} Проверьте вручную.`);
+      const lowNotice = (notice || '').toLowerCase();
+      if (notice && SENT_PHRASES.some((p) => lowNotice.includes(p))) {
+        // FB явно подтвердил отправку/публикацию — считаем успехом, даже если
+        // verify не нашёл текст (скрыт сортировкой/свёрнут). Не роняем и не даём
+        // повод для повтора → без дубля.
+        log.info(`[FB Bot] FB подтвердил отправку: «${notice}» — считаю опубликованным.`);
+        confirmed = true;
+      } else {
+        const extra = notice ? ` FB показал: «${notice}».` : ' (вероятно, FB придержал как спам).';
+        throw new Error(`${kind} не появился на посте.${extra} Проверьте вручную.`);
+      }
     }
     log.info(`[FB Bot] ${kind} подтверждён на посте${fieldCleared ? '' : ' (поле не очистилось, но текст есть)'}. Профиль ${profileUuid}`);
 
