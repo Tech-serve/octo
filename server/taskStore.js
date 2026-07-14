@@ -75,6 +75,39 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS idx_whitelist_fbid ON fb_whitelist(fb_id);
 `);
 
+// Страницы/личности FB, доступные в переключателе одного Octo-профиля (личный
+// аккаунт управляет несколькими Страницами). Нужны, чтобы бот переключился на
+// нужную Страницу перед скрытием комментов. Обновляются по кнопке.
+db.exec(`
+  CREATE TABLE IF NOT EXISTS fb_pages (
+    octo_uuid  TEXT NOT NULL,
+    page_id    TEXT NOT NULL,
+    page_name  TEXT,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (octo_uuid, page_id)
+  );
+`);
+const pagesDeleteStmt = db.prepare('DELETE FROM fb_pages WHERE octo_uuid = ?');
+const pagesInsertStmt = db.prepare('INSERT OR REPLACE INTO fb_pages (octo_uuid, page_id, page_name, updated_at) VALUES (?, ?, ?, ?)');
+const pagesListStmt = db.prepare('SELECT page_id, page_name FROM fb_pages WHERE octo_uuid = ? ORDER BY rowid ASC');
+
+// Перезаписать список страниц Octo-профиля целиком (свежий сбор).
+function savePages(octoUuid, pages) {
+  const now = new Date().toISOString();
+  const tx = db.prepare('BEGIN'); tx.run();
+  try {
+    pagesDeleteStmt.run(octoUuid);
+    (pages || []).forEach((p, i) => {
+      const id = String(p.id || `idx${i}`);
+      pagesInsertStmt.run(octoUuid, id, p.name || '', now);
+    });
+    db.prepare('COMMIT').run();
+  } catch (e) { db.prepare('ROLLBACK').run(); throw e; }
+}
+function getPages(octoUuid) {
+  return pagesListStmt.all(octoUuid).map((r) => ({ id: r.page_id, name: r.page_name || '' }));
+}
+
 // Черновики операций (надёжное серверное хранение вместо localStorage): структура
 // вкладок и поля каждой операции. Ключ — owner + key ('tabs' | 'op:<mode>:<id>').
 // data — JSON. Картинки хранятся ФАЙЛАМИ (в data только их URL).
@@ -347,4 +380,5 @@ module.exports = {
   upsertWhitelist, getWhitelist, listWhitelist,
   listByDialog, deleteTask,
   getDrafts, putDraft, deleteDraft, referencedUploadFiles,
+  savePages, getPages,
 };

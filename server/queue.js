@@ -1,7 +1,7 @@
 const config = require('./config');
 const store = require('./taskStore');
 const { createTaskLogger, logger } = require('./logger');
-const { leaveFacebookComment, hideForeignComments } = require('./fbWorker');
+const { leaveFacebookComment, hideForeignComments, collectPages } = require('./fbWorker');
 const { disconnectOcto } = require('./octoService');
 
 // Ручки бегущих задач (для жёсткой отмены): taskId -> { canceled, browser, profileUuid }.
@@ -207,7 +207,9 @@ async function runTask(task) {
     const maxAttempts = 1 + Math.max(0, config.taskRetries);
     for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
       try {
-        const worker = task.payload.type === 'hide' ? hideForeignComments : leaveFacebookComment;
+        let worker = leaveFacebookComment;
+        if (task.payload.type === 'hide') worker = hideForeignComments;
+        else if (task.payload.type === 'pages') worker = collectPages;
         const work = worker(task.payload, taskLog, handle);
         work.catch(() => {}); // проглотить, если таймаут выиграл гонку
         // eslint-disable-next-line no-await-in-loop

@@ -339,6 +339,10 @@ function Operation({
   const [dialogs, setDialogs] = useState(saved.dialogs || [{ steps: [newStep(null)] }])
   // Режим 4: чистка — ссылка на пост (админ хранится в profileUuid).
   const [post4, setPost4] = useState(saved.post4 || '')
+  // Режим 4: страницы FB-переключателя выбранного админа + выбранная страница.
+  const [pages, setPages] = useState([])
+  const [pageName, setPageName] = useState(saved.pageName || '')
+  const [collectingPages, setCollectingPages] = useState(false)
   const pollRef = useRef(null)
   const latestData = useRef(null)
 
@@ -346,7 +350,7 @@ function Operation({
   // (загружаются при выборе), поэтому тело маленькое — без квоты и потери данных.
   useEffect(() => {
     const data = {
-      profileUuid, posts, commentText, perComments, tasks, post2, entries, post3, dialogs, opImage, opImageName, post4,
+      profileUuid, posts, commentText, perComments, tasks, post2, entries, post3, dialogs, opImage, opImageName, post4, pageName,
     }
     latestData.current = data
     clearTimeout(draftSaveTimer.current)
@@ -354,7 +358,17 @@ function Operation({
       axios.put(`${API_BASE}/api/drafts/${draftKey}`, data).catch(() => {})
     }, 700)
     return () => clearTimeout(draftSaveTimer.current)
-  }, [draftKey, profileUuid, posts, commentText, perComments, tasks, post2, entries, post3, dialogs, opImage, opImageName, post4])
+  }, [draftKey, profileUuid, posts, commentText, perComments, tasks, post2, entries, post3, dialogs, opImage, opImageName, post4, pageName])
+
+  // Режим 4: подтягиваем сохранённые страницы выбранного админ-профиля.
+  useEffect(() => {
+    if (mode !== 4 || !profileUuid) return undefined
+    let alive = true
+    axios.get(`${API_BASE}/api/pages/${profileUuid}`)
+      .then(({ data }) => { if (alive) setPages(data.pages || []) })
+      .catch(() => { if (alive) setPages([]) })
+    return () => { alive = false }
+  }, [mode, profileUuid])
 
   // При размонтировании (например, переключили оффер) — дописываем последнее
   // состояние сразу, чтобы не потерять правки, не успевшие уйти по debounce.
@@ -561,6 +575,25 @@ function Operation({
     }
   }
 
+  // Режим 4: собрать страницы FB-переключателя выбранного админ-профиля.
+  const refreshPages = async () => {
+    if (!profileUuid) { setError('Сначала выберите админ-профиль'); return }
+    setError(''); setCollectingPages(true)
+    try {
+      await axios.post(`${API_BASE}/api/pages/collect`, { profileUuid })
+      // Бот открывает FB и читает переключатель — опрашиваем результат до ~45с.
+      for (let i = 0; i < 15; i += 1) {
+        await new Promise((r) => setTimeout(r, 3000))
+        const { data } = await axios.get(`${API_BASE}/api/pages/${profileUuid}`)
+        if ((data.pages || []).length) { setPages(data.pages); break }
+      }
+    } catch (e) {
+      setError(`Ошибка сбора страниц: ${e.response?.data?.error || e.message}`)
+    } finally {
+      setCollectingPages(false)
+    }
+  }
+
   // Режим 4: чистка — скрыть чужие комменты на посте от имени профиля-админа.
   const startMode4 = async () => {
     setError('')
@@ -569,7 +602,7 @@ function Operation({
     if (!url) { setError('Введите ссылку на пост'); return }
     setSubmitting(true)
     try {
-      const { data } = await axios.post(`${API_BASE}/api/hide`, { profileUuid, postUrl: url })
+      const { data } = await axios.post(`${API_BASE}/api/hide`, { profileUuid, postUrl: url, pageName })
       setTasks((data.tasks || []).map((t) => ({
         id: t.taskId, status: t.status, postUrl: t.postUrl, profileUuid: t.profileUuid,
         scheduledAt: t.scheduledAt, commentText: t.commentText,
@@ -1052,6 +1085,24 @@ function Operation({
             Нет профилей с тегом «Hide». Присвой админ-страницам тег Hide в Octo.
           </div>
         )}
+        <div style={{ display: 'flex', gap: '6px', alignItems: 'center' }}>
+          <select value={pageName} onChange={(e) => setPageName(e.target.value)} style={{ flex: 1, padding: '8px' }}>
+            <option value="">— страница (от чьего имени скрывать) —</option>
+            {pages.map((p) => (
+              <option key={p.id || p.name} value={p.name}>{p.name}</option>
+            ))}
+          </select>
+          <button
+            type="button"
+            className="tm-btn tm-btn-outline"
+            onClick={refreshPages}
+            disabled={collectingPages || !profileUuid}
+            title="Открыть FB этим профилем и собрать список его страниц из переключателя"
+            style={{ flex: '0 0 auto', whiteSpace: 'nowrap' }}
+          >
+            {collectingPages ? 'Собираю…' : '🔄 Обновить страницы'}
+          </button>
+        </div>
         <input type="text" placeholder="Ссылка на пост Facebook" value={post4} onChange={(e) => setPost4(e.target.value)} />
         <p className="tm-muted" style={{ fontSize: '12px', margin: 0 }}>
           Скрывает ЧУЖИЕ комментарии на посте от имени выбранного админа. Комментарии
@@ -1471,10 +1522,10 @@ function App() {
   }
 
   const MODES = [
-    { m: 1, label: 'Режим 1 · один фейк → много постов' },
-    { m: 2, label: 'Режим 2 · один пост → много фейков' },
-    { m: 3, label: 'Режим 3 · диалоги (дерево)' },
-    { m: 4, label: 'Режим 4 · чистка (скрыть чужих)' },
+    { m: 1, label: 'один фейк → много постов' },
+    { m: 2, label: 'один пост → много фейков' },
+    { m: 3, label: 'диалоги (дерево)' },
+    { m: 4, label: 'чистка (скрыть чужих)' },
   ]
 
   if (!IS_EMBEDDED && !IS_LOCAL) {

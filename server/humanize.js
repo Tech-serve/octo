@@ -339,6 +339,18 @@ async function humanType(page, text) {
       continue;
     }
 
+    // Перенос строки — Shift+Enter (мягкий перенос). Просто Enter в поле FB
+    // ОТПРАВЛЯЕТ коммент раньше времени → поле чистится → перепечатка/повторная
+    // отправка → дубль. Поэтому переносы вводим через Shift+Enter.
+    if (ch === '\n' || ch === '\r') {
+      await page.keyboard.down('Shift');
+      await page.keyboard.press('Enter');
+      await page.keyboard.up('Shift');
+      await sleep(Math.max(30, base + rand(0, 80)));
+      i++;
+      continue;
+    }
+
     await page.keyboard.type(ch);
 
     let delay = base + rand(-18, 35);

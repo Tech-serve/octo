@@ -482,8 +482,19 @@ async function switchToAllComments(page, log) {
     // eslint-disable-next-line no-await-in-loop
     await sleep(300);
   }
-  log.info('[FB Bot] Пункт «Все комментарии» в меню не найден.');
-  await page.keyboard.press('Escape').catch(() => {});
+  // ДИАГНОСТИКА: что реально в открытом меню сортировки (по ней подгоним подписи).
+  const items = await page.evaluate(() => {
+    const out = [];
+    for (const el of document.querySelectorAll('[role="menuitem"], [role="menuitemradio"], [role="menu"] div, [role="menu"] span')) {
+      const t = (el.innerText || '').replace(/\s+/g, ' ').trim();
+      if (t && t.length < 60 && !out.includes(t)) out.push(t);
+    }
+    return out.slice(0, 15);
+  }).catch(() => []);
+  log.info(`[FB Bot] Пункт «Все комментарии» не найден. Пункты меню: ${JSON.stringify(items)}`);
+  // НЕ Escape — он закрывает саму модалку поста и выкидывает на ленту. Закрываем
+  // меню повторным кликом по триггеру сортировки (безопасно, пост остаётся открыт).
+  await page.mouse.click(trigCoords.x, trigCoords.y).catch(() => {});
   return false;
 }
 
@@ -1013,48 +1024,130 @@ const HIDE_WORDS = [
   'masquer le commentaire', 'masquer', 'nascondi commento', 'nascondi',
   'ukryj komentarz', 'ukryj', 'yorumu gizle', 'gizle',
 ];
+// aria-label КОММЕНТАРИЯ-статьи (у самого поста он другой) — чтобы не лезть в пост.
+const COMMENT_ITEM_ARIA = [
+  'коммент', 'коментар', 'comment', 'comentario', 'comentário',
+  'kommentar', 'commentaire', 'commento', 'komentarz', 'yorum',
+];
 
-// Скрыть ОДИН коммент (наведён/помечен): «•••» -> «Скрыть». true если получилось.
-async function hideOneComment(page, article, log) {
+// Если «Скрыть» недоступно — удаляем (у удаления есть диалог подтверждения).
+const DELETE_WORDS = [
+  'удалить комментарий', 'удалить', 'видалити коментар', 'видалити',
+  'delete comment', 'delete', 'remove', 'eliminar comentario', 'eliminar', 'borrar',
+  'excluir comentário', 'excluir', 'apagar', 'kommentar löschen', 'löschen',
+  'supprimer le commentaire', 'supprimer', 'elimina commento', 'elimina',
+  'usuń komentarz', 'usuń', 'yorumu sil', 'sil',
+];
+
+// Кликнуть пункт открытого меню по тексту — ЭЛЕМЕНТОМ через Playwright (надёжно,
+// сам доводит в зону видимости; НЕ по координатам и БЕЗ Escape, чтобы не закрыть пост).
+async function clickMenuItem(page, words) {
+  const h = await page.evaluateHandle((ws) => {
+    const low = (s) => (s || '').trim().toLowerCase();
+    for (const it of document.querySelectorAll('[role="menuitem"], [role="menuitemcheckbox"], [role="menu"] span, [role="menu"] div')) {
+      const t = low(it.innerText || it.textContent);
+      if (t && t.length < 40 && ws.some((w) => t === w || t.startsWith(w))) {
+        let row = it;
+        for (let i = 0; i < 5 && row.parentElement; i += 1) {
+          const r = row.getAttribute && row.getAttribute('role');
+          if (r === 'menuitem' || r === 'menuitemcheckbox') break;
+          row = row.parentElement;
+        }
+        return row;
+      }
+    }
+    return null;
+  }, words).catch(() => null);
+  const el = h && h.asElement ? h.asElement() : null;
+  if (!el) return false;
+  try { await el.click({ timeout: 4000 }); return true; } catch { /* пробуем DOM-клик */ }
+  try { await el.evaluate((n) => n.click()); return true; } catch { return false; }
+}
+
+// Кликнуть кнопку в МАЛЕНЬКОМ диалоге подтверждения (напр. «Удалить») — элементом.
+async function clickConfirm(page, words) {
+  const h = await page.evaluateHandle((ws) => {
+    const low = (s) => (s || '').trim().toLowerCase();
+    for (const d of document.querySelectorAll('div[role="dialog"], div[role="alertdialog"]')) {
+      const r = d.getBoundingClientRect();
+      if (r.width > 700 || r.height > 460) continue; // это модалка поста, не подтверждение
+      for (const b of d.querySelectorAll('[role="button"], button')) {
+        const t = low(b.innerText || b.textContent);
+        const rr = b.getBoundingClientRect();
+        if (t && t.length < 22 && rr.width > 0 && rr.height > 0 && ws.some((w) => t === w || t.startsWith(w))) return b;
+      }
+    }
+    return null;
+  }, words).catch(() => null);
+  const el = h && h.asElement ? h.asElement() : null;
+  if (!el) return false;
+  try { await el.click({ timeout: 4000 }); return true; } catch { return false; }
+}
+
+// ПРОГРАММНЫЙ скролл комментов чистилки — крутим сам скроллируемый контейнер
+// (внутри модалки поста, иначе окно). НЕ колесом мыши: колесо у края модалки
+// крутит ленту за постом, и FB закрывает пост. scrollBy по элементу так не может.
+async function scrollComments(page) {
+  await page.evaluate(() => {
+    const modal = (() => {
+      for (const d of document.querySelectorAll('div[role="dialog"]')) {
+        const r = d.getBoundingClientRect();
+        if (r.width > 300 && r.height > 300) return d;
+      }
+      return null;
+    })();
+    const scope = modal || document;
+    let best = null; let bestH = 0;
+    for (const el of scope.querySelectorAll('div')) {
+      const st = getComputedStyle(el);
+      if ((st.overflowY === 'auto' || st.overflowY === 'scroll') && el.scrollHeight > el.clientHeight + 40) {
+        if (el.scrollHeight > bestH) { best = el; bestH = el.scrollHeight; }
+      }
+    }
+    if (best) best.scrollBy(0, Math.round(best.clientHeight * 0.85));
+    else if (modal && modal.scrollBy) modal.scrollBy(0, 600);
+    else window.scrollBy(0, 700);
+  }).catch(() => {});
+}
+
+// Обработать ОДИН чужой коммент: «•••» → «Скрыть»; если «Скрыть» нет — «Удалить»
+// (+ подтверждение). Возвращает { ok, action:'hide'|'delete' } или { ok:false }.
+async function actOnComment(page, article, log) {
   try { await article.scrollIntoViewIfNeeded(); } catch { /* ignore */ }
   try { await article.hover(); } catch { /* ignore */ }
   await sleep(rand(300, 700));
   const moreBtn = await article.evaluateHandle((node, words) => {
     const low = (s) => (s || '').toLowerCase();
-    for (const b of node.querySelectorAll('[role="button"], [aria-haspopup="menu"], div[aria-label]')) {
+    const vis = (el) => { const r = el.getBoundingClientRect(); return r.width > 0 && r.height > 0; };
+    for (const b of node.querySelectorAll('[role="button"][aria-label], [aria-label][tabindex]')) {
+      if (b.tagName === 'A') continue;
       const al = low(b.getAttribute('aria-label'));
-      const r = b.getBoundingClientRect();
-      if (al && r.width > 0 && r.height > 0 && words.some((w) => al.includes(w))) return b;
+      if (vis(b) && words.some((w) => al.includes(w))) return b;
+    }
+    for (const b of node.querySelectorAll('[aria-haspopup="menu"]')) {
+      if (b.tagName !== 'A' && vis(b)) return b;
     }
     return null;
   }, MORE_ARIA);
   const mb = moreBtn.asElement();
-  if (!mb) { log.info('[Чистка] Кнопка «•••» у коммента не найдена.'); return false; }
-  try { await mb.click({ timeout: 5000 }); } catch { try { await humanClick(page, mb); } catch { return false; } }
+  if (!mb) { log.info('[Чистка] Кнопка «•••» у коммента не найдена.'); return { ok: false }; }
+  try { await mb.click({ timeout: 5000 }); } catch { try { await humanClick(page, mb); } catch { return { ok: false }; } }
   await sleep(rand(600, 1200));
-  // Пункт «Скрыть» — в портале меню (document). Жмём реальной мышью по строке.
-  const coords = await page.evaluate((words) => {
-    const low = (s) => (s || '').trim().toLowerCase();
-    const items = document.querySelectorAll('[role="menuitem"], [role="menu"] span, [role="menu"] div, [role="dialog"] [role="button"]');
-    for (const it of items) {
-      const t = low(it.innerText || it.textContent);
-      if (t && t.length < 40 && words.some((w) => t === w || t.startsWith(w))) {
-        let row = it;
-        for (let i = 0; i < 5 && row.parentElement; i += 1) {
-          if (row.getAttribute && row.getAttribute('role') === 'menuitem') break;
-          row = row.parentElement;
-        }
-        row.scrollIntoView({ block: 'center' });
-        const r = row.getBoundingClientRect();
-        return { x: r.left + Math.min(r.width / 2, 90), y: r.top + r.height / 2 };
-      }
-    }
-    return null;
-  }, HIDE_WORDS).catch(() => null);
-  if (!coords) { await page.keyboard.press('Escape').catch(() => {}); log.info('[Чистка] Пункт «Скрыть» в меню не найден.'); return false; }
-  await page.mouse.click(coords.x, coords.y).catch(() => {});
-  await sleep(rand(800, 1500));
-  return true;
+
+  // 1) «Скрыть» (подтверждение не нужно). Клик ЭЛЕМЕНТОМ — не по фону.
+  if (await clickMenuItem(page, HIDE_WORDS)) {
+    await sleep(rand(700, 1300));
+    return { ok: true, action: 'hide' };
+  }
+  // 2) «Скрыть» нет — «Удалить» + подтверждение. БЕЗ Escape (он закрывает сам пост).
+  if (await clickMenuItem(page, DELETE_WORDS)) {
+    await sleep(rand(700, 1200));
+    await clickConfirm(page, DELETE_WORDS);
+    await sleep(rand(600, 1000));
+    return { ok: true, action: 'delete' };
+  }
+  log.info('[Чистка] В меню нет ни «Скрыть», ни «Удалить».');
+  return { ok: false };
 }
 
 async function hideForeignComments(payload, log, handle = {}) {
@@ -1077,11 +1170,21 @@ async function hideForeignComments(payload, log, handle = {}) {
     const { page } = connection;
     page.__persona = createPersona(profileUuid);
 
+    // Если задана страница — сначала переключаемся на неё (скрывать надо от её имени).
+    if (payload.pageName) {
+      try { await switchToPage(page, payload.pageName, log); } catch (e) { log.warn(`[Чистка] Переключение на страницу не удалось: ${e.message}`); }
+    }
+
+    // Открытие поста — ТОЧЬ-В-ТОЧЬ как в режимах постинга (проверенная «физика»).
     ensureLive();
-    log.info(`[Чистка] Открываю пост админом: ${postUrl}`);
+    log.info(`[Чистка] Переход на пост: ${postUrl}`);
     await page.goto(postUrl, { waitUntil: 'domcontentloaded', timeout: config.navTimeout });
     await silenceVideos(page, log);
-    await sleep(rand(1500, 3000));
+    await idleMouse(page);
+    const textLen = await page.evaluate(() => (document.body?.innerText || '').length);
+    const readMs = readingTimeFor(textLen);
+    log.info(`[Чистка] Читаю пост (~${Math.round(readMs / 1000)}с)...`);
+    await sleep(readMs);
 
     const block = await detectBlock(page);
     if (block) throw new Error(`Действие прервано: ${block}.`);
@@ -1090,18 +1193,22 @@ async function hideForeignComments(payload, log, handle = {}) {
 
     const dialog = await getDialog(page);
     if (dialog) {
+      log.info('[Чистка] Пост открыт в модальном окне — работаю внутри него.');
       const db = await dialog.boundingBox().catch(() => null);
-      if (db) await moveMouse(page, db.x + db.width * 0.5, db.y + db.height * 0.4);
+      if (db) await moveMouse(page, db.x + db.width * rand(0.4, 0.6), db.y + db.height * rand(0.4, 0.6));
     }
     await switchToAllComments(page, log);
 
-    let hidden = 0; let skippedOurs = 0; let noNew = 0;
+    let hidden = 0; let deleted = 0; let skippedOurs = 0; let failed = 0; let noNew = 0;
     const cap = 400;
-    while (hidden + skippedOurs < cap && !handle.canceled) {
+    while (hidden + deleted + skippedOurs < cap && !handle.canceled) {
+      ensureLive();
       // Следующий НЕобработанный видимый коммент + инфо об авторе.
       // eslint-disable-next-line no-await-in-loop
-      const h = await page.evaluateHandle(({ ids, names }) => {
+      const h = await page.evaluateHandle(({ ids, names, cwords }) => {
         const clean = (s) => (s || '').toLowerCase().replace(/\s+/g, ' ').trim();
+        // Модалка поста, если есть; иначе — вся страница (пост открылся полной
+        // страницей). Мы уже проверили по URL, что это пост, а не лента.
         const root = (() => {
           for (const d of document.querySelectorAll('div[role="dialog"]')) {
             const r = d.getBoundingClientRect();
@@ -1111,27 +1218,39 @@ async function hideForeignComments(payload, log, handle = {}) {
         })();
         for (const a of root.querySelectorAll('div[role="article"]')) {
           if (a.getAttribute('data-hide-seen')) continue;
+          // ТОЛЬКО комментарии: у самого поста aria-label другой. Иначе бот лез в
+          // «•••» поста и его картинку.
+          const al = clean(a.getAttribute('aria-label'));
+          if (!al || !cwords.some((w) => al.includes(w))) continue;
           const r = a.getBoundingClientRect();
           if (r.width <= 0 || r.height <= 0) continue;
           a.setAttribute('data-hide-seen', '1');
           let name = ''; let fid = '';
-          const link = a.querySelector('a[href*="/profile.php?id="], a[role="link"][href^="/"], a[role="link"][href^="https://www.facebook.com/"]');
-          if (link) {
-            name = clean(link.innerText || link.textContent);
-            const m = (link.getAttribute('href') || '').match(/[?&]id=(\d+)/);
-            if (m) fid = m[1];
+          // Имя — из aria-label статьи («Comment by X» / «Комментарий: X»): надёжнее,
+          // чем первая ссылка (ею могла быть иконка-индикатор статуса).
+          { const p = al.split(/:|\bby\b|\bfrom\b|\bde\b|\bvon\b|\bod\b/); if (p.length > 1) name = clean(p[p.length - 1]); }
+          // FB id — из ссылки на профиль автора (?id=), если есть.
+          const idLink = a.querySelector('a[href*="/profile.php?id="]');
+          if (idLink) { const m = (idLink.getAttribute('href') || '').match(/[?&]id=(\d+)/); if (m) fid = m[1]; }
+          // Если имени из aria-label нет — первая осмысленная профиль-ссылка (не индикатор).
+          if (!name) {
+            for (const l of a.querySelectorAll('a[role="link"][href]')) {
+              const t = clean(l.innerText || l.textContent);
+              if (t && t.length > 1 && !t.includes('индикатор') && !t.includes('status') && !t.includes('онлайн')) { name = t; break; }
+            }
           }
           const isOurs = (fid && ids.includes(fid)) || (name && names.includes(name));
           a.__hideOurs = isOurs;
           return a;
         }
         return null;
-      }, { ids: ourIds, names: ourNames }).catch(() => null);
+      }, { ids: ourIds, names: ourNames, cwords: COMMENT_ITEM_ARIA }).catch(() => null);
 
       const art = h && h.asElement ? h.asElement() : null;
       if (!art) {
+        // Программный скролл контейнера комментов (НЕ колесом — иначе крутится лента).
         // eslint-disable-next-line no-await-in-loop
-        await scrollPostArea(page);
+        await scrollComments(page);
         // eslint-disable-next-line no-await-in-loop
         await sleep(rand(900, 1500));
         noNew += 1;
@@ -1148,20 +1267,176 @@ async function hideForeignComments(payload, log, handle = {}) {
       }).catch(() => '');
       if (isOurs) { skippedOurs += 1; continue; }
       // eslint-disable-next-line no-await-in-loop
-      const ok = await hideOneComment(page, art, log);
-      if (ok) {
+      const res = await actOnComment(page, art, log);
+      if (res.ok && res.action === 'hide') {
         hidden += 1;
-        log.info(`[Чистка] Скрыт чужой коммент (${author || '—'}). Всего скрыто: ${hidden}`);
+        log.info(`[Чистка] Скрыт чужой коммент (${author || '—'}). Скрыто: ${hidden}`);
+      } else if (res.ok && res.action === 'delete') {
+        deleted += 1;
+        log.info(`[Чистка] Удалён чужой коммент — «Скрыть» было недоступно (${author || '—'}). Удалено: ${deleted}`);
+      } else {
+        failed += 1;
       }
       // eslint-disable-next-line no-await-in-loop
       await sleep(rand(1000, 2000)); // человеческая пауза 1–2 сек
     }
 
-    log.info(`[Чистка] Готово. Скрыто чужих: ${hidden}, наших пропущено: ${skippedOurs}.`);
-    return { hidden, skippedOurs };
+    log.info(`[Чистка] Готово. Скрыто: ${hidden}, удалено: ${deleted}, наших пропущено: ${skippedOurs}, не удалось: ${failed}.`);
+    return {
+      hidden, deleted, skippedOurs, failed,
+    };
   } finally {
     if (connection && profileUuid) await disconnectOcto(profileUuid, log);
   }
 }
 
-module.exports = { leaveFacebookComment, hideForeignComments };
+// ─────────────────────────────────────────────────────────────────────────
+// СБОР СТРАНИЦ: какие FB-страницы/личности доступны в переключателе Octo-профиля.
+// ─────────────────────────────────────────────────────────────────────────
+
+// Кнопка меню аккаунта (аватар справа вверху) — мультиязычно.
+const ACCOUNT_BTN_ARIA = [
+  'ваш профиль', 'аккаунт', 'your profile', 'account', 'меню аккаунта',
+  'obliczówка', 'tu perfil', 'seu perfil', 'dein konto', 'ton compte', 'profil',
+];
+// «Все профили» — якорь: реальные профили-строки идут ВЫШЕ него в поповере.
+const ALL_PROFILES_WORDS = [
+  'все профили', 'усі профілі', 'see all profiles', 'all profiles',
+  'todos los perfiles', 'ver todos los perfiles', 'todos os perfis',
+  'alle profile', 'tous les profils', 'tutti i profili',
+];
+// После этих пунктов в меню идут уже не страницы, а системные ссылки — стоп.
+const PAGES_STOP = [
+  'все профили', 'усі профілі', 'see all profiles', 'all profiles',
+  'настройки', 'settings', 'справка', 'help', 'выйти', 'log out', 'logout',
+  'конфиденциальн', 'privacy', 'отзыв', 'feedback', 'сообщить', 'report',
+  'отображение', 'display', 'условия', 'terms',
+];
+
+// Открыть меню аккаунта (клик по аватару справа вверху). true если кликнули.
+async function openAccountMenu(page) {
+  return page.evaluate((words) => {
+    const low = (s) => (s || '').toLowerCase();
+    const cands = [...document.querySelectorAll('[role="button"][aria-label], [aria-haspopup="menu"][aria-label], a[aria-label]')];
+    let best = null; let bestX = -1;
+    for (const b of cands) {
+      const al = low(b.getAttribute('aria-label'));
+      const r = b.getBoundingClientRect();
+      if (r.width <= 0 || r.height <= 0 || r.top > 90) continue;
+      if (words.some((w) => al.includes(w)) && r.left > bestX) { best = b; bestX = r.left; }
+    }
+    if (!best) {
+      for (const b of cands) {
+        const r = b.getBoundingClientRect();
+        if (r.top < 70 && r.right > window.innerWidth - 120 && r.width > 0) best = b;
+      }
+    }
+    if (best) { best.click(); return true; }
+    return false;
+  }, ACCOUNT_BTN_ARIA).catch(() => false);
+}
+
+// Переключиться на нужную FB-страницу через переключатель аккаунта. best-effort.
+async function switchToPage(page, pageName, log) {
+  if (!pageName) return false;
+  log.info(`[Чистка] Переключаюсь на страницу «${pageName}»...`);
+  await page.goto('https://www.facebook.com/', { waitUntil: 'domcontentloaded', timeout: config.navTimeout });
+  await sleep(rand(2500, 4000));
+  if (!(await openAccountMenu(page))) { log.warn('[Чистка] Меню аккаунта не открылось — работаю без переключения.'); return false; }
+  await sleep(rand(1200, 2200));
+  // Координаты строки нужного профиля в поповере (реальный клик мышью — DOM .click()
+  // переключатель FB игнорирует, как и меню сортировки).
+  const coords = await page.evaluate(({ name, words }) => {
+    const clean = (s) => (s || '').replace(/\s+/g, ' ').trim();
+    const low = (s) => clean(s).toLowerCase();
+    let anchor = null;
+    for (const el of document.querySelectorAll('div, span, a, [role="button"]')) {
+      const t = low(el.innerText || el.textContent);
+      if (t.length <= 20 && words.some((w) => t === w)) { const r = el.getBoundingClientRect(); if (r.width > 0 && r.height > 0) { anchor = el; break; } }
+    }
+    if (!anchor) return null;
+    let box = anchor;
+    for (let i = 0; i < 8 && box.parentElement; i += 1) { box = box.parentElement; const r = box.getBoundingClientRect(); if (r.height > 220 && r.width > 200 && r.width < 520) break; }
+    const aTop = anchor.getBoundingClientRect().top;
+    const rows = [...box.querySelectorAll('a[role="link"], [role="button"], [role="menuitem"], [role="listitem"]')]
+      .map((el) => ({ el, r: el.getBoundingClientRect(), t: clean(el.innerText || el.textContent) }))
+      .filter((x) => x.t && x.t.length >= 2 && x.t.length <= 40 && x.r.height > 0 && x.r.bottom <= aTop + 4)
+      .sort((x, y) => x.r.top - y.r.top);
+    for (const x of rows) {
+      if (low(x.t) === name || low(x.t).startsWith(name)) {
+        x.el.scrollIntoView({ block: 'center' });
+        const r = x.el.getBoundingClientRect();
+        return { x: r.left + Math.min(r.width / 2, 120), y: r.top + r.height / 2 };
+      }
+    }
+    return null;
+  }, { name: pageName.replace(/\s+/g, ' ').trim().toLowerCase(), words: ALL_PROFILES_WORDS }).catch(() => null);
+  if (!coords) { log.warn(`[Чистка] Страница «${pageName}» не найдена в переключателе — работаю как есть.`); return false; }
+  await page.mouse.click(coords.x, coords.y).catch(() => {});
+  await sleep(rand(4000, 6000)); // FB переключает активный профиль (перезагрузка контекста)
+  log.info(`[Чистка] Переключился на «${pageName}».`);
+  return true;
+}
+
+async function collectPages(payload, log, handle = {}) {
+  const { profileUuid } = payload;
+  const ensureLive = () => { if (handle.canceled) throw new Error('Операция отменена пользователем'); };
+  let connection;
+  try {
+    connection = await connectToOcto(profileUuid, log, { forceRestart: true });
+    handle.browser = connection.browser;
+    const { page } = connection;
+    page.__persona = createPersona(profileUuid);
+
+    ensureLive();
+    log.info('[Страницы] Открываю facebook.com...');
+    await page.goto('https://www.facebook.com/', { waitUntil: 'domcontentloaded', timeout: config.navTimeout });
+    await sleep(rand(2500, 4000));
+
+    const block = await detectBlock(page);
+    if (block) throw new Error(`Действие прервано: ${block}.`);
+
+    // Клик по аватару/кнопке меню аккаунта (правый верхний угол).
+    const clicked = await openAccountMenu(page);
+    if (!clicked) throw new Error('Не нашёл кнопку меню аккаунта (аватар справа вверху).');
+    log.info('[Страницы] Открыл меню аккаунта, читаю список...');
+    await sleep(rand(1200, 2200));
+
+    const raw = await page.evaluate((words) => {
+      const clean = (s) => (s || '').replace(/\s+/g, ' ').trim();
+      const low = (s) => clean(s).toLowerCase();
+      // Якорь: пункт «Все профили» — под ним системные ссылки, над ним — профили.
+      let anchor = null;
+      for (const el of document.querySelectorAll('div, span, a, [role="button"]')) {
+        const t = low(el.innerText || el.textContent);
+        if (t.length <= 20 && words.some((w) => t === w)) { const r = el.getBoundingClientRect(); if (r.width > 0 && r.height > 0) { anchor = el; break; } }
+      }
+      if (!anchor) return { items: [], dump: ['нет якоря «Все профили» — меню не открылось?'] };
+      // Контейнер поповера: поднимаемся, пока не станет похоже на попап.
+      let box = anchor;
+      for (let i = 0; i < 8 && box.parentElement; i += 1) { box = box.parentElement; const r = box.getBoundingClientRect(); if (r.height > 220 && r.width > 200 && r.width < 520) break; }
+      const aTop = anchor.getBoundingClientRect().top;
+      const seen = new Set(); const out = []; const dump = [];
+      [...box.querySelectorAll('a[role="link"], [role="button"], [role="menuitem"], [role="listitem"]')]
+        .map((el) => ({ el, r: el.getBoundingClientRect(), t: clean(el.innerText || el.textContent) }))
+        .filter((x) => x.t && x.t.length >= 2 && x.t.length <= 40 && x.r.height > 0 && x.r.bottom <= aTop + 4)
+        .sort((x, y) => x.r.top - y.r.top)
+        .forEach((x) => {
+          dump.push(x.t);
+          if (seen.has(x.t)) return; seen.add(x.t);
+          let id = ''; const a = x.el.matches('a[href]') ? x.el : x.el.querySelector('a[href]'); const href = a ? (a.getAttribute('href') || '') : ''; const m = href.match(/profile\.php\?id=(\d+)/); if (m) id = m[1];
+          out.push({ name: x.t, id });
+        });
+      return { items: out, dump: dump.slice(0, 20) };
+    }, ALL_PROFILES_WORDS).catch(() => ({ items: [], dump: [] }));
+
+    const pages = (raw.items || []).filter((p) => p.name && p.name.length > 1);
+    store.savePages(profileUuid, pages);
+    log.info(`[Страницы] Сохранено страниц: ${pages.length} — ${JSON.stringify(pages.map((p) => p.name))}`);
+    return { pages: pages.length };
+  } finally {
+    if (connection && profileUuid) await disconnectOcto(profileUuid, log);
+  }
+}
+
+module.exports = { leaveFacebookComment, hideForeignComments, collectPages };

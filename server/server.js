@@ -521,6 +521,23 @@ app.post('/api/tasks/:id/retry', ownerMiddleware, (req, res) => {
   res.json({ ok: true, task: store.toPublic(task) });
 });
 
+// Страницы Octo-профиля (из FB-переключателя): список + сбор по требованию.
+app.get('/api/pages/:uuid', ownerMiddleware, (req, res) => {
+  res.json({ pages: store.getPages(req.params.uuid) });
+});
+app.post('/api/pages/collect', ownerMiddleware, (req, res) => {
+  const profileUuid = req.body && req.body.profileUuid;
+  if (!profileUuid) return res.status(400).json({ error: 'Выберите профиль' });
+  const owner = config.authEnabled ? req.owner : 'local';
+  const now = Date.now();
+  const task = store.createTask(
+    { profileUuid, postUrl: 'https://www.facebook.com/', commentText: 'Сбор страниц профиля', type: 'pages' },
+    { scheduledAt: queue.earliestSlot(profileUuid, now, now), owner },
+  );
+  queue.enqueue(task);
+  res.status(202).json({ taskId: task.id, status: task.status });
+});
+
 // РЕЖИМ 4 · ЧИСТКА: скрыть чужие комменты на посте от имени профиля-админа.
 // Наши фейки (по вайт-листу) не трогаем — это делает воркер hideForeignComments.
 app.post('/api/hide', ownerMiddleware, (req, res) => {
@@ -528,10 +545,17 @@ app.post('/api/hide', ownerMiddleware, (req, res) => {
   const postUrl = req.body && (req.body.postUrl || '').trim();
   if (!profileUuid) return res.status(400).json({ error: 'Выберите профиль-админ' });
   if (!postUrl) return res.status(400).json({ error: 'Введите ссылку на пост' });
+  const pageName = req.body && (req.body.pageName || '').trim();
   const owner = config.authEnabled ? req.owner : 'local';
   const now = Date.now();
   const task = store.createTask(
-    { profileUuid, postUrl, commentText: 'Чистка · скрыть чужие комментарии', type: 'hide' },
+    {
+      profileUuid,
+      postUrl,
+      commentText: pageName ? `Чистка · от имени «${pageName}»` : 'Чистка · скрыть чужие комментарии',
+      pageName,
+      type: 'hide',
+    },
     { scheduledAt: queue.earliestSlot(profileUuid, now, now), owner },
   );
   queue.enqueue(task);
