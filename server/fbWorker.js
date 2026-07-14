@@ -3,6 +3,7 @@ const {
   connectToOcto, disconnectOcto, readFbIdentity, detectAccountStatus,
 } = require('./octoService');
 const config = require('./config');
+const store = require('./taskStore');
 const {
   sleep, rand, randInt,
   createPersona, getPersona,
@@ -995,4 +996,172 @@ async function leaveFacebookComment(payload, log, handle = {}) {
   }
 }
 
-module.exports = { leaveFacebookComment };
+// ─────────────────────────────────────────────────────────────────────────
+// ЧИСТКА: скрыть ЧУЖИЕ комментарии на посте (наши фейки по вайт-листу не трогаем).
+// Работает от имени профиля-владельца/админа поста (право «Скрыть»).
+// ─────────────────────────────────────────────────────────────────────────
+
+// Кнопка «Ещё/•••» у коммента (aria-label) и пункт «Скрыть комментарий» — мультиязычно.
+const MORE_ARIA = [
+  'more', 'ещё', 'еще', 'дополнительно', 'действия', 'параметры', 'опции',
+  'ще', 'дії', 'більше', 'más', 'mais', 'mehr', 'plus', 'altro', 'więcej', 'daha',
+];
+const HIDE_WORDS = [
+  'скрыть комментарий', 'скрыть', 'приховати коментар', 'приховати',
+  'hide comment', 'hide', 'ocultar comentario', 'ocultar',
+  'ocultar comentário', 'kommentar ausblenden', 'ausblenden',
+  'masquer le commentaire', 'masquer', 'nascondi commento', 'nascondi',
+  'ukryj komentarz', 'ukryj', 'yorumu gizle', 'gizle',
+];
+
+// Скрыть ОДИН коммент (наведён/помечен): «•••» -> «Скрыть». true если получилось.
+async function hideOneComment(page, article, log) {
+  try { await article.scrollIntoViewIfNeeded(); } catch { /* ignore */ }
+  try { await article.hover(); } catch { /* ignore */ }
+  await sleep(rand(300, 700));
+  const moreBtn = await article.evaluateHandle((node, words) => {
+    const low = (s) => (s || '').toLowerCase();
+    for (const b of node.querySelectorAll('[role="button"], [aria-haspopup="menu"], div[aria-label]')) {
+      const al = low(b.getAttribute('aria-label'));
+      const r = b.getBoundingClientRect();
+      if (al && r.width > 0 && r.height > 0 && words.some((w) => al.includes(w))) return b;
+    }
+    return null;
+  }, MORE_ARIA);
+  const mb = moreBtn.asElement();
+  if (!mb) { log.info('[Чистка] Кнопка «•••» у коммента не найдена.'); return false; }
+  try { await mb.click({ timeout: 5000 }); } catch { try { await humanClick(page, mb); } catch { return false; } }
+  await sleep(rand(600, 1200));
+  // Пункт «Скрыть» — в портале меню (document). Жмём реальной мышью по строке.
+  const coords = await page.evaluate((words) => {
+    const low = (s) => (s || '').trim().toLowerCase();
+    const items = document.querySelectorAll('[role="menuitem"], [role="menu"] span, [role="menu"] div, [role="dialog"] [role="button"]');
+    for (const it of items) {
+      const t = low(it.innerText || it.textContent);
+      if (t && t.length < 40 && words.some((w) => t === w || t.startsWith(w))) {
+        let row = it;
+        for (let i = 0; i < 5 && row.parentElement; i += 1) {
+          if (row.getAttribute && row.getAttribute('role') === 'menuitem') break;
+          row = row.parentElement;
+        }
+        row.scrollIntoView({ block: 'center' });
+        const r = row.getBoundingClientRect();
+        return { x: r.left + Math.min(r.width / 2, 90), y: r.top + r.height / 2 };
+      }
+    }
+    return null;
+  }, HIDE_WORDS).catch(() => null);
+  if (!coords) { await page.keyboard.press('Escape').catch(() => {}); log.info('[Чистка] Пункт «Скрыть» в меню не найден.'); return false; }
+  await page.mouse.click(coords.x, coords.y).catch(() => {});
+  await sleep(rand(800, 1500));
+  return true;
+}
+
+async function hideForeignComments(payload, log, handle = {}) {
+  const { profileUuid, postUrl } = payload;
+  const ensureLive = () => { if (handle.canceled) throw new Error('Операция отменена пользователем'); };
+
+  // Наши фейки — по вайт-листу: множества FB id и имён, чьи комменты НЕ трогаем.
+  const wl = store.listWhitelist();
+  const ourIds = []; const ourNames = [];
+  for (const k of Object.keys(wl)) {
+    if (wl[k].fbId) ourIds.push(String(wl[k].fbId));
+    if (wl[k].fbName) ourNames.push(String(wl[k].fbName).toLowerCase().replace(/\s+/g, ' ').trim());
+  }
+  log.info(`[Чистка] Своих в вайт-листе: id=${ourIds.length}, имён=${ourNames.length}.`);
+
+  let connection;
+  try {
+    connection = await connectToOcto(profileUuid, log, { forceRestart: true });
+    handle.browser = connection.browser;
+    const { page } = connection;
+    page.__persona = createPersona(profileUuid);
+
+    ensureLive();
+    log.info(`[Чистка] Открываю пост админом: ${postUrl}`);
+    await page.goto(postUrl, { waitUntil: 'domcontentloaded', timeout: config.navTimeout });
+    await silenceVideos(page, log);
+    await sleep(rand(1500, 3000));
+
+    const block = await detectBlock(page);
+    if (block) throw new Error(`Действие прервано: ${block}.`);
+    const early = await diagnosePostProblem(page);
+    if (early.hard) throw new Error(`${early.reason.charAt(0).toUpperCase()}${early.reason.slice(1)}.`);
+
+    const dialog = await getDialog(page);
+    if (dialog) {
+      const db = await dialog.boundingBox().catch(() => null);
+      if (db) await moveMouse(page, db.x + db.width * 0.5, db.y + db.height * 0.4);
+    }
+    await switchToAllComments(page, log);
+
+    let hidden = 0; let skippedOurs = 0; let noNew = 0;
+    const cap = 400;
+    while (hidden + skippedOurs < cap && !handle.canceled) {
+      // Следующий НЕобработанный видимый коммент + инфо об авторе.
+      // eslint-disable-next-line no-await-in-loop
+      const h = await page.evaluateHandle(({ ids, names }) => {
+        const clean = (s) => (s || '').toLowerCase().replace(/\s+/g, ' ').trim();
+        const root = (() => {
+          for (const d of document.querySelectorAll('div[role="dialog"]')) {
+            const r = d.getBoundingClientRect();
+            if (r.width > 300 && r.height > 300) return d;
+          }
+          return document;
+        })();
+        for (const a of root.querySelectorAll('div[role="article"]')) {
+          if (a.getAttribute('data-hide-seen')) continue;
+          const r = a.getBoundingClientRect();
+          if (r.width <= 0 || r.height <= 0) continue;
+          a.setAttribute('data-hide-seen', '1');
+          let name = ''; let fid = '';
+          const link = a.querySelector('a[href*="/profile.php?id="], a[role="link"][href^="/"], a[role="link"][href^="https://www.facebook.com/"]');
+          if (link) {
+            name = clean(link.innerText || link.textContent);
+            const m = (link.getAttribute('href') || '').match(/[?&]id=(\d+)/);
+            if (m) fid = m[1];
+          }
+          const isOurs = (fid && ids.includes(fid)) || (name && names.includes(name));
+          a.__hideOurs = isOurs;
+          return a;
+        }
+        return null;
+      }, { ids: ourIds, names: ourNames }).catch(() => null);
+
+      const art = h && h.asElement ? h.asElement() : null;
+      if (!art) {
+        // eslint-disable-next-line no-await-in-loop
+        await scrollPostArea(page);
+        // eslint-disable-next-line no-await-in-loop
+        await sleep(rand(900, 1500));
+        noNew += 1;
+        if (noNew >= 4) break;
+        continue;
+      }
+      noNew = 0;
+      // eslint-disable-next-line no-await-in-loop
+      const isOurs = await art.evaluate((el) => !!el.__hideOurs).catch(() => false);
+      // eslint-disable-next-line no-await-in-loop
+      const author = await art.evaluate((el) => {
+        const l = el.querySelector('a[role="link"], a[href]');
+        return l ? (l.innerText || l.textContent || '').trim().slice(0, 40) : '';
+      }).catch(() => '');
+      if (isOurs) { skippedOurs += 1; continue; }
+      // eslint-disable-next-line no-await-in-loop
+      const ok = await hideOneComment(page, art, log);
+      if (ok) {
+        hidden += 1;
+        log.info(`[Чистка] Скрыт чужой коммент (${author || '—'}). Всего скрыто: ${hidden}`);
+      }
+      // eslint-disable-next-line no-await-in-loop
+      await sleep(rand(1000, 2000)); // человеческая пауза 1–2 сек
+    }
+
+    log.info(`[Чистка] Готово. Скрыто чужих: ${hidden}, наших пропущено: ${skippedOurs}.`);
+    return { hidden, skippedOurs };
+  } finally {
+    if (connection && profileUuid) await disconnectOcto(profileUuid, log);
+  }
+}
+
+module.exports = { leaveFacebookComment, hideForeignComments };

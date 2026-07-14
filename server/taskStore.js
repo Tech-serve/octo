@@ -46,6 +46,7 @@ for (const alter of [
   'ALTER TABLE tasks ADD COLUMN depends_on TEXT',  // режим 3: id задачи-предшественника
   'ALTER TABLE tasks ADD COLUMN reply_to_text TEXT', // режим 3: текст коммента, на который отвечаем
   "ALTER TABLE tasks ADD COLUMN owner TEXT DEFAULT 'local'", // владелец задачи (user.id баера)
+  "ALTER TABLE tasks ADD COLUMN kind TEXT DEFAULT 'comment'", // тип: 'comment' | 'hide'
 ]) {
   try { db.exec(alter); } catch { /* колонка уже есть */ }
 }
@@ -137,6 +138,7 @@ function rowToTask(r) {
       baseText: r.base_text || r.comment_text,
       imagePath: r.image_path || null,
       replyToText: r.reply_to_text || null,
+      type: r.kind || 'comment',
     },
     owner: r.owner || 'local',
     dependsOn: r.depends_on || null,
@@ -153,9 +155,9 @@ function rowToTask(r) {
 
 const insertStmt = db.prepare(`
   INSERT INTO tasks (id, status, profile_uuid, post_url, comment_text, base_text, image_path,
-    dialog_id, step_order, depends_on, reply_to_text, owner,
+    dialog_id, step_order, depends_on, reply_to_text, owner, kind,
     error, created_at, scheduled_at, started_at, finished_at, logs)
-  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 `);
 const countSameStmt = db.prepare(
   "SELECT COUNT(*) AS n FROM tasks WHERE profile_uuid = ? AND base_text = ? AND status = 'done'",
@@ -197,7 +199,7 @@ function createTask(payload, opts = {}) {
   const owner = opts.owner || 'local';
   insertStmt.run(
     id, STATUS.QUEUED, payload.profileUuid, payload.postUrl, payload.commentText,
-    baseText, imagePath, dialogId, stepOrder, dependsOn, replyToText, owner,
+    baseText, imagePath, dialogId, stepOrder, dependsOn, replyToText, owner, payload.type || 'comment',
     null, createdAt, scheduledAt, null, null, '',
   );
   return {

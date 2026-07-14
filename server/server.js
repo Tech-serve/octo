@@ -513,11 +513,40 @@ app.post('/api/tasks/:id/retry', ownerMiddleware, (req, res) => {
       baseText: old.payload.baseText,
       imagePath: old.payload.imagePath,
       replyToText: old.payload.replyToText,
+      type: old.payload.type,
     },
     { scheduledAt: queue.earliestSlot(old.payload.profileUuid, now, now), owner: old.owner },
   );
   queue.enqueue(task);
   res.json({ ok: true, task: store.toPublic(task) });
+});
+
+// РЕЖИМ 4 · ЧИСТКА: скрыть чужие комменты на посте от имени профиля-админа.
+// Наши фейки (по вайт-листу) не трогаем — это делает воркер hideForeignComments.
+app.post('/api/hide', ownerMiddleware, (req, res) => {
+  const profileUuid = req.body && req.body.profileUuid;
+  const postUrl = req.body && (req.body.postUrl || '').trim();
+  if (!profileUuid) return res.status(400).json({ error: 'Выберите профиль-админ' });
+  if (!postUrl) return res.status(400).json({ error: 'Введите ссылку на пост' });
+  const owner = config.authEnabled ? req.owner : 'local';
+  const now = Date.now();
+  const task = store.createTask(
+    { profileUuid, postUrl, commentText: 'Чистка · скрыть чужие комментарии', type: 'hide' },
+    { scheduledAt: queue.earliestSlot(profileUuid, now, now), owner },
+  );
+  queue.enqueue(task);
+  res.status(202).json({
+    tasks: [{
+      taskId: task.id,
+      status: task.status,
+      postUrl,
+      profileUuid,
+      scheduledAt: task.scheduledAt,
+      commentText: task.payload.commentText,
+    }],
+    count: 1,
+    ...queue.stats(),
+  });
 });
 
 // Статус конкретной задачи (для поллинга с фронта). Только своя задача.

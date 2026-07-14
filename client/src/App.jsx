@@ -93,7 +93,22 @@ function taskStatusText(task) {
 const MAX_POSTS = 10
 
 // Режимы с двумя уровнями вкладок: Оффер → Операция. Лимита на число операций нет.
-const MODE_IDS = [1, 2, 3]
+const MODE_IDS = [1, 2, 3, 4]
+
+// Достроить недостающие режимы (напр. новый Режим 4 у пользователей со старой
+// структурой), чтобы offers[m] всегда существовал и рендер не падал.
+function ensureAllModes(s) {
+  for (const m of MODE_IDS) {
+    if (!s.offers[m] || !s.offers[m].length) {
+      s.offers[m] = [{ id: 1, name: 'Оффер 1', ops: [{ id: 1, name: 'Операция 1' }], activeOp: 1 }]
+      s.activeOffer[m] = 1; s.nextOfferId[m] = 2; s.nextOpId[m] = 2
+    }
+    if (s.activeOffer[m] == null) s.activeOffer[m] = s.offers[m][0].id
+    if (s.nextOfferId[m] == null) s.nextOfferId[m] = Math.max(...s.offers[m].map((o) => o.id)) + 1
+    if (s.nextOpId[m] == null) s.nextOpId[m] = 2
+  }
+  return s
+}
 
 // Структура вкладок по умолчанию: в каждом режиме один оффер с одной операцией.
 function defaultOffers() {
@@ -109,7 +124,7 @@ function defaultOffers() {
 // плоского { tabs, activeId, nextId } — оборачиваем операции в один оффер).
 function migrateStruct(t) {
   if (!t) return defaultOffers()
-  if (t.offers && t.activeOffer && t.nextOfferId && t.nextOpId) return t
+  if (t.offers && t.activeOffer && t.nextOfferId && t.nextOpId) return ensureAllModes(t)
   if (t.tabs && t.activeId && t.nextId) {
     const offers = {}; const activeOffer = {}; const nextOfferId = {}; const nextOpId = {}
     for (const m of MODE_IDS) {
@@ -117,7 +132,7 @@ function migrateStruct(t) {
       offers[m] = [{ id: 1, name: 'Оффер 1', ops, activeOp: t.activeId[m] || ops[0].id }]
       activeOffer[m] = 1; nextOfferId[m] = 2; nextOpId[m] = t.nextId[m] || (ops.length + 1)
     }
-    return { offers, activeOffer, nextOfferId, nextOpId }
+    return ensureAllModes({ offers, activeOffer, nextOfferId, nextOpId })
   }
   return defaultOffers()
 }
@@ -322,6 +337,8 @@ function Operation({
     profileUuid: '', tag: '', search: '', text: '', replyTo, image: null, imageName: '',
   })
   const [dialogs, setDialogs] = useState(saved.dialogs || [{ steps: [newStep(null)] }])
+  // Режим 4: чистка — ссылка на пост (админ хранится в profileUuid).
+  const [post4, setPost4] = useState(saved.post4 || '')
   const pollRef = useRef(null)
   const latestData = useRef(null)
 
@@ -329,7 +346,7 @@ function Operation({
   // (загружаются при выборе), поэтому тело маленькое — без квоты и потери данных.
   useEffect(() => {
     const data = {
-      profileUuid, posts, commentText, perComments, tasks, post2, entries, post3, dialogs, opImage, opImageName,
+      profileUuid, posts, commentText, perComments, tasks, post2, entries, post3, dialogs, opImage, opImageName, post4,
     }
     latestData.current = data
     clearTimeout(draftSaveTimer.current)
@@ -337,7 +354,7 @@ function Operation({
       axios.put(`${API_BASE}/api/drafts/${draftKey}`, data).catch(() => {})
     }, 700)
     return () => clearTimeout(draftSaveTimer.current)
-  }, [draftKey, profileUuid, posts, commentText, perComments, tasks, post2, entries, post3, dialogs, opImage, opImageName])
+  }, [draftKey, profileUuid, posts, commentText, perComments, tasks, post2, entries, post3, dialogs, opImage, opImageName, post4])
 
   // При размонтировании (например, переключили оффер) — дописываем последнее
   // состояние сразу, чтобы не потерять правки, не успевшие уйти по debounce.
@@ -358,6 +375,8 @@ function Operation({
 
   // Список зафиксирован на фейках (теги Fakes/Sweeps) — выбор тега убран из UI.
   const baseProfiles = profiles.filter((p) => (p.tags || []).some(isAllowedTag))
+  // Режим 4: админ-профили с тегом «Hide» (право скрывать чужие комменты).
+  const adminProfiles = profiles.filter((p) => (p.tags || []).includes('Hide'))
   const source = baseProfiles
   const filteredProfiles = source.filter(
     (p) => !search || (p.title || '').toLowerCase().includes(search.toLowerCase()),
@@ -542,7 +561,28 @@ function Operation({
     }
   }
 
+  // Режим 4: чистка — скрыть чужие комменты на посте от имени профиля-админа.
+  const startMode4 = async () => {
+    setError('')
+    const url = post4.trim()
+    if (!profileUuid) { setError('Выберите профиль-админ (тег Hide)'); return }
+    if (!url) { setError('Введите ссылку на пост'); return }
+    setSubmitting(true)
+    try {
+      const { data } = await axios.post(`${API_BASE}/api/hide`, { profileUuid, postUrl: url })
+      setTasks((data.tasks || []).map((t) => ({
+        id: t.taskId, status: t.status, postUrl: t.postUrl, profileUuid: t.profileUuid,
+        scheduledAt: t.scheduledAt, commentText: t.commentText,
+      })))
+    } catch (e) {
+      setError(`Ошибка: ${e.response?.data?.error || e.message}`)
+    } finally {
+      setSubmitting(false)
+    }
+  }
+
   const startTask = async () => {
+    if (mode === 4) { await startMode4(); return }
     if (mode === 3) { await startMode3(); return }
     if (mode === 2) { await startMode2(); return }
     setError('')
@@ -988,8 +1028,40 @@ function Operation({
       </>
       )}
 
+      {mode === 4 && (
+      <>
+        <input
+          type="text"
+          placeholder="Поиск админа по названию"
+          value={search}
+          onChange={(e) => setSearch(e.target.value)}
+        />
+        <select value={profileUuid} onChange={(e) => setProfileUuid(e.target.value)} style={{ padding: '8px' }}>
+          <option value="">— выберите админа (тег Hide) —</option>
+          {adminProfiles
+            .filter((p) => !search || (p.title || '').toLowerCase().includes(search.toLowerCase()))
+            .map((p) => (
+              <option key={p.uuid} value={p.uuid}>
+                {p.flag ? `⚠️ ${flagLabel(p.flag.reason)} ` : ''}{p.title}{p.fbName ? ` · ${p.fbName}` : ''}
+              </option>
+            ))}
+        </select>
+        {loadingProfiles && <div className="tm-muted">Загрузка профилей Octo…</div>}
+        {!loadingProfiles && adminProfiles.length === 0 && (
+          <div className="tm-muted" style={{ fontSize: '12px' }}>
+            Нет профилей с тегом «Hide». Присвой админ-страницам тег Hide в Octo.
+          </div>
+        )}
+        <input type="text" placeholder="Ссылка на пост Facebook" value={post4} onChange={(e) => setPost4(e.target.value)} />
+        <p className="tm-muted" style={{ fontSize: '12px', margin: 0 }}>
+          Скрывает ЧУЖИЕ комментарии на посте от имени выбранного админа. Комментарии
+          наших фейков (по вайт-листу) не трогает. Пауза 1–2 сек между скрытиями.
+        </p>
+      </>
+      )}
+
       <button className="tm-btn tm-btn-primary" onClick={startTask} disabled={submitting || isBusy}>
-        {submitting ? 'Отправка…' : isBusy ? 'Выполняется…' : 'Запустить'}
+        {submitting ? 'Отправка…' : isBusy ? 'Выполняется…' : (mode === 4 ? 'Очистить' : 'Запустить')}
       </button>
 
       {error && <p className="tm-danger-text" style={{ fontWeight: 'bold', margin: 0 }}>{error}</p>}
@@ -1402,6 +1474,7 @@ function App() {
     { m: 1, label: 'Режим 1 · один фейк → много постов' },
     { m: 2, label: 'Режим 2 · один пост → много фейков' },
     { m: 3, label: 'Режим 3 · диалоги (дерево)' },
+    { m: 4, label: 'Режим 4 · чистка (скрыть чужих)' },
   ]
 
   if (!IS_EMBEDDED && !IS_LOCAL) {
