@@ -343,6 +343,8 @@ function Operation({
   const [pages, setPages] = useState([])
   const [pageName, setPageName] = useState(saved.pageName || '')
   const [collectingPages, setCollectingPages] = useState(false)
+  const [collectSeconds, setCollectSeconds] = useState(0)
+  const collectTimerRef = useRef(null)
   const pollRef = useRef(null)
   const latestData = useRef(null)
 
@@ -578,11 +580,13 @@ function Operation({
   // Режим 4: собрать страницы FB-переключателя выбранного админ-профиля.
   const refreshPages = async () => {
     if (!profileUuid) { setError('Сначала выберите админ-профиль'); return }
-    setError(''); setCollectingPages(true)
+    setError(''); setCollectingPages(true); setCollectSeconds(0); setPages([])
+    clearInterval(collectTimerRef.current)
+    collectTimerRef.current = setInterval(() => setCollectSeconds((s) => s + 1), 1000)
     try {
       await axios.post(`${API_BASE}/api/pages/collect`, { profileUuid })
-      // Бот открывает FB и читает переключатель — опрашиваем результат до ~45с.
-      for (let i = 0; i < 15; i += 1) {
+      // Бот открывает FB и читает переключатель — опрашиваем, пока не соберёт (до ~60с).
+      for (let i = 0; i < 20; i += 1) {
         await new Promise((r) => setTimeout(r, 3000))
         const { data } = await axios.get(`${API_BASE}/api/pages/${profileUuid}`)
         if ((data.pages || []).length) { setPages(data.pages); break }
@@ -590,6 +594,7 @@ function Operation({
     } catch (e) {
       setError(`Ошибка сбора страниц: ${e.response?.data?.error || e.message}`)
     } finally {
+      clearInterval(collectTimerRef.current)
       setCollectingPages(false)
     }
   }
@@ -1098,11 +1103,27 @@ function Operation({
             onClick={refreshPages}
             disabled={collectingPages || !profileUuid}
             title="Открыть FB этим профилем и собрать список его страниц из переключателя"
-            style={{ flex: '0 0 auto', whiteSpace: 'nowrap' }}
+            style={{ flex: '0 0 auto', whiteSpace: 'nowrap', display: 'inline-flex', alignItems: 'center', gap: '8px' }}
           >
-            {collectingPages ? 'Собираю…' : '🔄 Обновить страницы'}
+            {collectingPages && (
+              <span
+                aria-hidden
+                style={{
+                  width: 14, height: 14, borderRadius: '50%', flex: '0 0 auto',
+                  border: '2px solid var(--muted)', borderTopColor: 'transparent',
+                  display: 'inline-block', animation: 'tmspin 0.8s linear infinite',
+                }}
+              />
+            )}
+            {collectingPages ? `Собираю… ${collectSeconds}с` : '🔄 Обновить страницы'}
           </button>
+          <style>{'@keyframes tmspin{to{transform:rotate(360deg)}}'}</style>
         </div>
+        {collectingPages && (
+          <div className="tm-muted" style={{ fontSize: '12px' }}>
+            Бот открывает Facebook этим профилем и читает переключатель страниц… (~20–40 сек)
+          </div>
+        )}
         <input type="text" placeholder="Ссылка на пост Facebook" value={post4} onChange={(e) => setPost4(e.target.value)} />
         <p className="tm-muted" style={{ fontSize: '12px', margin: 0 }}>
           Скрывает ЧУЖИЕ комментарии на посте от имени выбранного админа. Комментарии
