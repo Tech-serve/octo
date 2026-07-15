@@ -412,8 +412,11 @@ async function silenceVideos(page, log, rounds = 3) {
 // только что оставленную родительскую реплику). Тихо пропускаем, если не нашли.
 async function switchToAllComments(page, log) {
   // 1) Триггер сортировки («Самые актуальные ▾») ищем ТОЛЬКО в модалке поста и
-  // жмём РЕАЛЬНОЙ мышью — DOM .click() по внутреннему span у FB не открывает меню.
-  const trigCoords = await page.evaluate((triggers) => {
+  // жмём его ЭЛЕМЕНТОМ через Playwright: он проверяет, что элемент — верхний в
+  // точке клика. Если подпись перекрыта картинкой поста (фото-пост), клик НЕ
+  // пройдёт сквозь на картинку (раньше клик по координатам центра контейнера
+  // попадал на изображение и открывал /photo/).
+  const trigger = await page.evaluateHandle((triggers) => {
     const low = (s) => (s || '').trim().toLowerCase();
     const root = (() => {
       for (const d of document.querySelectorAll('div[role="dialog"]')) {
@@ -422,27 +425,37 @@ async function switchToAllComments(page, log) {
       }
       return document;
     })();
-    let hit = null;
-    for (const el of root.querySelectorAll('[role="button"], span, div')) {
+    const match = (el) => {
       const t = low(el.innerText || el.textContent);
-      // Короткий текст, начинающийся с подписи сортировки (без описаний-тултипов).
-      if (t && t.length < 26 && triggers.some((w) => t === w || t.startsWith(w))) {
-        const r = el.getBoundingClientRect();
-        if (r.width > 0 && r.height > 0) { hit = el; break; }
+      return t && t.length < 26 && triggers.some((w) => t === w || t.startsWith(w));
+    };
+    // 1) Сначала настоящая кнопка сортировки role=button — маленькая, без картинки
+    //    внутри (чтобы не поймать колоночный контейнер, накрывающий фото поста).
+    let best = null;
+    let bestH = Infinity;
+    for (const el of root.querySelectorAll('[role="button"]')) {
+      if (!match(el)) continue;
+      const r = el.getBoundingClientRect();
+      if (r.width > 0 && r.height > 0 && r.height < 120 && !el.querySelector('img')) {
+        if (r.height < bestH) { best = el; bestH = r.height; }
       }
     }
-    if (!hit) return null;
-    let btn = hit;
-    for (let up = 0; up < 6 && btn.parentElement; up += 1) {
-      if (btn.getAttribute && btn.getAttribute('role') === 'button') break;
-      btn = btn.parentElement;
+    if (best) return best;
+    // 2) Фолбэк — сама подпись; берём САМЫЙ КОМПАКТНЫЙ элемент с текстом (интерактивную
+    //    надпись, а не широкую div-обёртку, клик по центру которой промахивается).
+    let label = null;
+    let labelH = Infinity;
+    for (const el of root.querySelectorAll('span, div')) {
+      if (!match(el)) continue;
+      const r = el.getBoundingClientRect();
+      if (r.width > 0 && r.height > 0 && r.height < 60 && r.height < labelH) { label = el; labelH = r.height; }
     }
-    (btn || hit).scrollIntoView({ block: 'center' });
-    const r = (btn || hit).getBoundingClientRect();
-    return { x: r.left + r.width / 2, y: r.top + r.height / 2 };
-  }, SORT_TRIGGER).catch(() => null);
-  if (!trigCoords) { log.info('[FB Bot] Триггер сортировки комментов не найден — оставляю как есть.'); return false; }
-  await page.mouse.click(trigCoords.x, trigCoords.y).catch(() => {});
+    return label;
+  }, SORT_TRIGGER);
+  const trigEl = trigger && trigger.asElement ? trigger.asElement() : null;
+  if (!trigEl) { log.info('[FB Bot] Триггер сортировки комментов не найден — оставляю как есть.'); return false; }
+  try { await trigEl.scrollIntoViewIfNeeded({ timeout: 3000 }); } catch { /* ignore */ }
+  try { await trigEl.click({ timeout: 4000 }); } catch { log.info('[FB Bot] Не удалось открыть меню сортировки — оставляю как есть.'); return false; }
   log.info('[FB Bot] Открываю меню сортировки комментов…');
 
   // 2) Ждём появления пункта «Все комментарии» (портал в document) и жмём по его
@@ -493,8 +506,8 @@ async function switchToAllComments(page, log) {
   }).catch(() => []);
   log.info(`[FB Bot] Пункт «Все комментарии» не найден. Пункты меню: ${JSON.stringify(items)}`);
   // НЕ Escape — он закрывает саму модалку поста и выкидывает на ленту. Закрываем
-  // меню повторным кликом по триггеру сортировки (безопасно, пост остаётся открыт).
-  await page.mouse.click(trigCoords.x, trigCoords.y).catch(() => {});
+  // меню повторным кликом по триггеру (элементом, безопасно, пост остаётся открыт).
+  try { await trigEl.click({ timeout: 3000 }); } catch { /* ignore */ }
   return false;
 }
 
@@ -1030,6 +1043,15 @@ const COMMENT_ITEM_ARIA = [
   'kommentar', 'commentaire', 'commento', 'komentarz', 'yorum',
 ];
 
+// Плейсхолдер уже скрытого коммента — такие пропускаем (их меню = «Показать»,
+// а не «Скрыть», иначе они ложно уходят в «не удалось»).
+const HIDDEN_MARKERS = [
+  'комментарий скрыт', 'коментар приховано', 'вы скрыли этот комментарий',
+  'comment hidden', 'you hid this comment', 'this comment is hidden',
+  'comentario oculto', 'comentário oculto', 'kommentar ausgeblendet',
+  'commentaire masqué', 'commento nascosto', 'komentarz ukryty', 'yorum gizlendi',
+];
+
 // Если «Скрыть» недоступно — удаляем (у удаления есть диалог подтверждения).
 const DELETE_WORDS = [
   'удалить комментарий', 'удалить', 'видалити коментар', 'видалити',
@@ -1110,12 +1132,57 @@ async function scrollComments(page) {
   }).catch(() => {});
 }
 
+// Прокрутить список комментов В САМЫЙ ВЕРХ (для контрольного пере-прохода).
+async function scrollCommentsToTop(page) {
+  await page.evaluate(() => {
+    const modal = (() => {
+      for (const d of document.querySelectorAll('div[role="dialog"]')) {
+        const r = d.getBoundingClientRect();
+        if (r.width > 300 && r.height > 300) return d;
+      }
+      return null;
+    })();
+    const scope = modal || document;
+    let best = null; let bestH = 0;
+    for (const el of scope.querySelectorAll('div')) {
+      const st = getComputedStyle(el);
+      if ((st.overflowY === 'auto' || st.overflowY === 'scroll') && el.scrollHeight > el.clientHeight + 40) {
+        if (el.scrollHeight > bestH) { best = el; bestH = el.scrollHeight; }
+      }
+    }
+    if (best) best.scrollTop = 0;
+    else if (modal) modal.scrollTop = 0;
+    else window.scrollTo(0, 0);
+  }).catch(() => {});
+}
+
+// Снять пометки «уже осмотрен» — чтобы контрольный проход пересканировал заново.
+async function clearHideSeen(page) {
+  await page.evaluate(() => {
+    for (const a of document.querySelectorAll('[data-hide-seen]')) a.removeAttribute('data-hide-seen');
+  }).catch(() => {});
+}
+
+// Диагностика: модалка/URL/кол-во статей (ловим момент, когда бот проваливается
+// в /photo/ или теряет пост).
+async function logState(page, log, tag) {
+  const s = await page.evaluate(() => {
+    let modal = false;
+    for (const d of document.querySelectorAll('div[role="dialog"]')) {
+      const r = d.getBoundingClientRect();
+      if (r.width > 300 && r.height > 300) { modal = true; break; }
+    }
+    return { modal, arts: document.querySelectorAll('div[role="article"]').length, url: location.href.slice(0, 90) };
+  }).catch(() => ({ modal: '?', arts: '?', url: '?' }));
+  log.info(`[Чистка] STATE ${tag}: модалка=${s.modal}, articles=${s.arts}, url=${s.url}`);
+}
+
 // Обработать ОДИН чужой коммент: «•••» → «Скрыть»; если «Скрыть» нет — «Удалить»
 // (+ подтверждение). Возвращает { ok, action:'hide'|'delete' } или { ok:false }.
 async function actOnComment(page, article, log) {
+  await logState(page, log, 'до');
   try { await article.scrollIntoViewIfNeeded(); } catch { /* ignore */ }
-  try { await article.hover(); } catch { /* ignore */ }
-  await sleep(rand(300, 700));
+  await sleep(rand(200, 400));
   const moreBtn = await article.evaluateHandle((node, words) => {
     const low = (s) => (s || '').toLowerCase();
     const vis = (el) => { const r = el.getBoundingClientRect(); return r.width > 0 && r.height > 0; };
@@ -1131,12 +1198,18 @@ async function actOnComment(page, article, log) {
   }, MORE_ARIA);
   const mb = moreBtn.asElement();
   if (!mb) { log.info('[Чистка] Кнопка «•••» у коммента не найдена.'); return { ok: false }; }
+  // Наводимся на САМУ «•••» (правый-верхний угол коммента), а НЕ на центр статьи —
+  // у комментов с фото центр = картинка, и наведение/клик открывал её в театре.
+  try { await mb.hover({ timeout: 3000 }); } catch { /* ignore */ }
+  await sleep(rand(150, 350));
   try { await mb.click({ timeout: 5000 }); } catch { try { await humanClick(page, mb); } catch { return { ok: false }; } }
   await sleep(rand(600, 1200));
+  await logState(page, log, 'после •••');
 
   // 1) «Скрыть» (подтверждение не нужно). Клик ЭЛЕМЕНТОМ — не по фону.
   if (await clickMenuItem(page, HIDE_WORDS)) {
     await sleep(rand(700, 1300));
+    await logState(page, log, 'после Скрыть');
     return { ok: true, action: 'hide' };
   }
   // 2) «Скрыть» нет — «Удалить» + подтверждение. БЕЗ Escape (он закрывает сам пост).
@@ -1144,9 +1217,14 @@ async function actOnComment(page, article, log) {
     await sleep(rand(700, 1200));
     await clickConfirm(page, DELETE_WORDS);
     await sleep(rand(600, 1000));
+    await logState(page, log, 'после Удалить');
     return { ok: true, action: 'delete' };
   }
+  // Меню открыто, но подходящих пунктов нет — закрываем его повторным кликом по
+  // «•••» (НЕ Escape: он закрыл бы сам пост), чтобы не мешало следующему комменту.
   log.info('[Чистка] В меню нет ни «Скрыть», ни «Удалить».');
+  try { await mb.click({ timeout: 3000 }); } catch { /* ignore */ }
+  await sleep(rand(200, 400));
   return { ok: false };
 }
 
@@ -1199,86 +1277,137 @@ async function hideForeignComments(payload, log, handle = {}) {
     }
     await switchToAllComments(page, log);
 
-    let hidden = 0; let deleted = 0; let skippedOurs = 0; let failed = 0; let noNew = 0;
+    let hidden = 0; let deleted = 0; let skippedOurs = 0; let failed = 0;
     const cap = 400;
-    while (hidden + deleted + skippedOurs < cap && !handle.canceled) {
-      ensureLive();
-      // Следующий НЕобработанный видимый коммент + инфо об авторе.
-      // eslint-disable-next-line no-await-in-loop
-      const h = await page.evaluateHandle(({ ids, names, cwords }) => {
-        const clean = (s) => (s || '').toLowerCase().replace(/\s+/g, ' ').trim();
-        // Модалка поста, если есть; иначе — вся страница (пост открылся полной
-        // страницей). Мы уже проверили по URL, что это пост, а не лента.
-        const root = (() => {
-          for (const d of document.querySelectorAll('div[role="dialog"]')) {
-            const r = d.getBoundingClientRect();
-            if (r.width > 300 && r.height > 300) return d;
-          }
-          return document;
-        })();
-        for (const a of root.querySelectorAll('div[role="article"]')) {
-          if (a.getAttribute('data-hide-seen')) continue;
-          // ТОЛЬКО комментарии: у самого поста aria-label другой. Иначе бот лез в
-          // «•••» поста и его картинку.
-          const al = clean(a.getAttribute('aria-label'));
-          if (!al || !cwords.some((w) => al.includes(w))) continue;
-          const r = a.getBoundingClientRect();
-          if (r.width <= 0 || r.height <= 0) continue;
-          a.setAttribute('data-hide-seen', '1');
-          let name = ''; let fid = '';
-          // Имя — из aria-label статьи («Comment by X» / «Комментарий: X»): надёжнее,
-          // чем первая ссылка (ею могла быть иконка-индикатор статуса).
-          { const p = al.split(/:|\bby\b|\bfrom\b|\bde\b|\bvon\b|\bod\b/); if (p.length > 1) name = clean(p[p.length - 1]); }
-          // FB id — из ссылки на профиль автора (?id=), если есть.
-          const idLink = a.querySelector('a[href*="/profile.php?id="]');
-          if (idLink) { const m = (idLink.getAttribute('href') || '').match(/[?&]id=(\d+)/); if (m) fid = m[1]; }
-          // Если имени из aria-label нет — первая осмысленная профиль-ссылка (не индикатор).
-          if (!name) {
-            for (const l of a.querySelectorAll('a[role="link"][href]')) {
-              const t = clean(l.innerText || l.textContent);
-              if (t && t.length > 1 && !t.includes('индикатор') && !t.includes('status') && !t.includes('онлайн')) { name = t; break; }
+    // Основной проход + контрольные пере-проходы: заново скроллим сверху и
+    // добираем чужие комменты, которые не догрузились/пропустились. Стоп, когда
+    // контрольный проход не находит НИ ОДНОГО чужого коммента.
+    const MAX_PASSES = 4;
+    for (let pass = 0; pass < MAX_PASSES && !handle.canceled; pass += 1) {
+      if (pass > 0) {
+        ensureLive();
+        log.info(`[Чистка] Контрольный проход #${pass}: проверяю, что все чужие скрыты…`);
+        // eslint-disable-next-line no-await-in-loop
+        await scrollCommentsToTop(page);
+        // eslint-disable-next-line no-await-in-loop
+        await clearHideSeen(page);
+        // eslint-disable-next-line no-await-in-loop
+        await sleep(rand(1200, 1800));
+      }
+      let actedThisPass = 0; let noNew = 0;
+      while (hidden + deleted + skippedOurs < cap && !handle.canceled) {
+        ensureLive();
+        // Следующий НЕобработанный видимый коммент + инфо об авторе.
+        // eslint-disable-next-line no-await-in-loop
+        const h = await page.evaluateHandle(({
+          ids, names, cwords, hiddenMarks,
+        }) => {
+          const clean = (s) => (s || '').toLowerCase().replace(/\s+/g, ' ').trim();
+          // Модалка поста, если есть; иначе — вся страница (пост открылся полной
+          // страницей). Мы уже проверили по URL, что это пост, а не лента.
+          const root = (() => {
+            for (const d of document.querySelectorAll('div[role="dialog"]')) {
+              const r = d.getBoundingClientRect();
+              if (r.width > 300 && r.height > 300) return d;
             }
+            return document;
+          })();
+          for (const a of root.querySelectorAll('div[role="article"]')) {
+            if (a.getAttribute('data-hide-seen')) continue;
+            // Коммент, который дважды не удалось тронуть, больше не пробуем.
+            if (a.getAttribute('data-hide-failed')) continue;
+            // ТОЛЬКО комментарии: у самого поста aria-label другой. Иначе бот лез в
+            // «•••» поста и его картинку.
+            const al = clean(a.getAttribute('aria-label'));
+            if (!al || !cwords.some((w) => al.includes(w))) continue;
+            const r = a.getBoundingClientRect();
+            if (r.width <= 0 || r.height <= 0) continue;
+            a.setAttribute('data-hide-seen', '1');
+            // Уже скрытый коммент (плейсхолдер «Комментарий скрыт») — пропускаем: его
+            // меню = «Показать», а не «Скрыть», иначе он ложно уходит в «не удалось».
+            const txt = clean(a.innerText || a.textContent);
+            if (txt && hiddenMarks.some((w) => txt.includes(w))) continue;
+            let name = ''; let fid = '';
+            const skipLink = (t) => !t || t.length < 2 || t.length > 60
+              || t.includes('индикатор') || t.includes('status') || t.includes('онлайн')
+              || t.includes('online') || /^\d+$/.test(t);
+            // Имя автора — текст первой осмысленной профиль-ссылки в шапке коммента
+            // (аватар-ссылка идёт первой, но без текста — её отсеиваем).
+            for (const l of a.querySelectorAll('a[role="link"][href], a[href]')) {
+              const t = clean(l.innerText || l.textContent);
+              if (!skipLink(t)) { name = t; break; }
+            }
+            // Резерв — из aria-label статьи («Comment by X» / «Комментарий от X»).
+            if (!name) {
+              const p = al.split(/:|\bby\b|\bfrom\b|\bот\b|\bвід\b|\bde\b|\bvon\b|\bod\b/);
+              if (p.length > 1) name = clean(p[p.length - 1]);
+            }
+            // FB id — из ссылки на профиль автора (?id=), если есть.
+            const idLink = a.querySelector('a[href*="/profile.php?id="]');
+            if (idLink) { const m = (idLink.getAttribute('href') || '').match(/[?&]id=(\d+)/); if (m) fid = m[1]; }
+            const isOurs = (fid && ids.includes(fid)) || (name && names.includes(name));
+            a.__hideOurs = isOurs;
+            a.__hideName = name;
+            return a;
           }
-          const isOurs = (fid && ids.includes(fid)) || (name && names.includes(name));
-          a.__hideOurs = isOurs;
-          return a;
-        }
-        return null;
-      }, { ids: ourIds, names: ourNames, cwords: COMMENT_ITEM_ARIA }).catch(() => null);
+          return null;
+        }, {
+          ids: ourIds, names: ourNames, cwords: COMMENT_ITEM_ARIA, hiddenMarks: HIDDEN_MARKERS,
+        }).catch(() => null);
 
-      const art = h && h.asElement ? h.asElement() : null;
-      if (!art) {
-        // Программный скролл контейнера комментов (НЕ колесом — иначе крутится лента).
+        const art = h && h.asElement ? h.asElement() : null;
+        if (!art) {
+          // Программный скролл контейнера комментов (НЕ колесом — иначе крутится лента).
+          // eslint-disable-next-line no-await-in-loop
+          await scrollComments(page);
+          // eslint-disable-next-line no-await-in-loop
+          await sleep(rand(900, 1500));
+          // eslint-disable-next-line no-await-in-loop
+          await logState(page, log, 'после скролла');
+          noNew += 1;
+          if (noNew >= 4) break;
+          continue;
+        }
+        noNew = 0;
         // eslint-disable-next-line no-await-in-loop
-        await scrollComments(page);
+        const isOurs = await art.evaluate((el) => !!el.__hideOurs).catch(() => false);
         // eslint-disable-next-line no-await-in-loop
-        await sleep(rand(900, 1500));
-        noNew += 1;
-        if (noNew >= 4) break;
-        continue;
+        const author = await art.evaluate((el) => (el.__hideName || '').slice(0, 40)).catch(() => '');
+        // Свой (вайт-лист) — НЕ трогаем. Считаем только в первом проходе (в
+        // контрольных они пересканируются заново).
+        if (isOurs) {
+          if (pass === 0) { skippedOurs += 1; log.info(`[Чистка] Свой коммент — пропускаю (${author || '—'}). Пропущено: ${skippedOurs}`); }
+          continue;
+        }
+        actedThisPass += 1;
+        // eslint-disable-next-line no-await-in-loop
+        const res = await actOnComment(page, art, log);
+        if (res.ok && res.action === 'hide') {
+          hidden += 1;
+          log.info(`[Чистка] Скрыт чужой коммент (${author || '—'}). Скрыто: ${hidden}`);
+        } else if (res.ok && res.action === 'delete') {
+          deleted += 1;
+          log.info(`[Чистка] Удалён чужой коммент — «Скрыть» было недоступно (${author || '—'}). Удалено: ${deleted}`);
+        } else {
+          // Один повтор на следующем проходе; после второго провала — бросаем и
+          // считаем «не удалось» один раз.
+          // eslint-disable-next-line no-await-in-loop
+          const nFails = await art.evaluate((el) => {
+            const n = (parseInt(el.getAttribute('data-hide-fails') || '0', 10) || 0) + 1;
+            el.setAttribute('data-hide-fails', String(n));
+            if (n >= 2) el.setAttribute('data-hide-failed', '1');
+            return n;
+          }).catch(() => 2);
+          if (nFails >= 2) failed += 1;
+        }
+        // eslint-disable-next-line no-await-in-loop
+        await sleep(rand(1000, 2000)); // человеческая пауза 1–2 сек
       }
-      noNew = 0;
-      // eslint-disable-next-line no-await-in-loop
-      const isOurs = await art.evaluate((el) => !!el.__hideOurs).catch(() => false);
-      // eslint-disable-next-line no-await-in-loop
-      const author = await art.evaluate((el) => {
-        const l = el.querySelector('a[role="link"], a[href]');
-        return l ? (l.innerText || l.textContent || '').trim().slice(0, 40) : '';
-      }).catch(() => '');
-      if (isOurs) { skippedOurs += 1; continue; }
-      // eslint-disable-next-line no-await-in-loop
-      const res = await actOnComment(page, art, log);
-      if (res.ok && res.action === 'hide') {
-        hidden += 1;
-        log.info(`[Чистка] Скрыт чужой коммент (${author || '—'}). Скрыто: ${hidden}`);
-      } else if (res.ok && res.action === 'delete') {
-        deleted += 1;
-        log.info(`[Чистка] Удалён чужой коммент — «Скрыть» было недоступно (${author || '—'}). Удалено: ${deleted}`);
-      } else {
-        failed += 1;
+      // Первый проход выполняем всегда; контрольные — пока находят чужих.
+      if (pass > 0 && actedThisPass === 0) {
+        log.info('[Чистка] Контроль: чужих комментов больше не осталось.');
+        break;
       }
-      // eslint-disable-next-line no-await-in-loop
-      await sleep(rand(1000, 2000)); // человеческая пауза 1–2 сек
     }
 
     log.info(`[Чистка] Готово. Скрыто: ${hidden}, удалено: ${deleted}, наших пропущено: ${skippedOurs}, не удалось: ${failed}.`);
