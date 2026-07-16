@@ -298,12 +298,38 @@ async function connectToOcto(profileUuid, log, opts = {}) {
   return { browser, page };
 }
 
-async function disconnectOcto(profileUuid, log) {
-  try {
-    log.info(`[Octo] Закрытие профиля ${profileUuid}...`);
-    await axios.post(`${OCTO_LOCAL_API}/stop`, { uuid: profileUuid });
-  } catch (err) {
-    log.warn(`[Octo] Не удалось корректно остановить профиль: ${err.message}`);
+// Остановить профиль в Octo с повторами. «Не запущен/уже остановлен» = успех
+// (профиль и так закрыт). Возвращает true, если Octo подтвердил остановку.
+async function stopOctoProfile(profileUuid) {
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    try {
+      // eslint-disable-next-line no-await-in-loop
+      await axios.post(`${OCTO_LOCAL_API}/stop`, { uuid: profileUuid }, { timeout: 15000 });
+      return true;
+    } catch (e) {
+      const body = (e.response && e.response.data) || {};
+      const msg = String(body.msg || body.error || body.message || e.message || '').toLowerCase();
+      // Профиль уже не запущен — считаем закрытым.
+      if (/not started|not running|not found|не запущ|уже остановлен|already stopped|stopped/.test(msg)) return true;
+      // eslint-disable-next-line no-await-in-loop
+      if (attempt < 2) await sleep(1500);
+    }
+  }
+  return false;
+}
+
+// Закрыть профиль: СНАЧАЛА отпускаем Playwright-подключение (CDP) — пока оно живо,
+// Octo часто не добивает окно, застрявшее на логине/чекпоинте, — ПОТОМ /stop с
+// повторами. Так мёртвые-сессии не остаются висеть открытыми.
+async function disconnectOcto(profileUuid, log, browser) {
+  if (browser) {
+    try { await browser.close(); } catch { /* уже закрыт/оборван — не страшно */ }
+  }
+  log.info(`[Octo] Закрытие профиля ${profileUuid}...`);
+  const ok = await stopOctoProfile(profileUuid);
+  if (!ok) {
+    log.warn(`[Octo] Не удалось подтвердить остановку профиля ${profileUuid} — закройте вручную в Octo.`);
   }
 }
 

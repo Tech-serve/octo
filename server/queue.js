@@ -1,7 +1,9 @@
 const config = require('./config');
 const store = require('./taskStore');
 const { createTaskLogger, logger } = require('./logger');
-const { leaveFacebookComment, hideForeignComments, collectPages } = require('./fbWorker');
+const {
+  leaveFacebookComment, hideForeignComments, collectPages, scoutWatchedPosts,
+} = require('./fbWorker');
 const { disconnectOcto } = require('./octoService');
 
 // Ручки бегущих задач (для жёсткой отмены): taskId -> { canceled, browser, profileUuid }.
@@ -13,8 +15,19 @@ const running = new Map();
 //     браузер Octo) — параллелятся только разные профили.
 const pending = [];
 let active = 0;
+// Из них — фоновые задачи авто-чистки (тип 'hidebg'). Они низкоприоритетны и
+// им достаётся не больше половины СВОБОДНЫХ слотов (вторая половина — буфер под
+// постинг). Ручная чистка (тип 'hide') сюда НЕ входит — она идёт как обычная.
+let activeBg = 0;
 const runningProfiles = new Set();
 let ticker = null;
+
+// Сколько фоновых чисток можно держать одновременно ПРЯМО СЕЙЧАС: половина
+// слотов, не занятых постингом/обычными задачами (посты всегда в приоритете).
+function bgAllowedNow() {
+  const nonBg = active - activeBg; // занятые постингом/обычными задачами
+  return Math.floor((config.maxConcurrent - nonBg) / 2);
+}
 
 // Скользящее среднее реальной длительности задачи (учимся на фактах).
 let avgDurationMs = 90000; // стартовая оценка до первых замеров
@@ -135,6 +148,7 @@ function drain() {
   let started = true;
   while (active < config.maxConcurrent && started) {
     started = false;
+    let bgPick = -1; // первый готовый к запуску фоновый (низкий приоритет)
     for (let i = 0; i < pending.length; i++) {
       const task = pending[i];
 
@@ -157,10 +171,27 @@ function drain() {
 
       if ((task.scheduledAt || 0) > now) continue; // ещё не время
       if (runningProfiles.has(task.payload.profileUuid)) continue; // профиль занят
+
+      // Фон наблюдения (скаут + авто-чистка) придерживаем: запускаем только когда
+      // обычных задач (постинг/деревья/ручная чистка) на запуск не осталось.
+      if (task.payload.type === 'hidebg' || task.payload.type === 'scout') {
+        if (bgPick === -1) bgPick = i;
+        continue;
+      }
+
       pending.splice(i, 1);
       runTask(task);
       started = true;
       break; // пересчитываем условия цикла заново
+    }
+    if (started) continue; // обрыв ветки или запуск обычной — пересчитать заново
+
+    // Обычных к запуску нет — берём фоновую чистку, если её квота не исчерпана
+    // (не более половины свободных слотов; вторая половина — буфер под постинг).
+    if (bgPick >= 0 && activeBg < bgAllowedNow()) {
+      const task = pending.splice(bgPick, 1)[0];
+      runTask(task);
+      started = true;
     }
   }
 }
@@ -177,6 +208,8 @@ function isRetryable(msg) {
 
 async function runTask(task) {
   active++;
+  const isBg = task.payload.type === 'hidebg' || task.payload.type === 'scout';
+  if (isBg) activeBg += 1;
   runningProfiles.add(task.payload.profileUuid);
   const handle = { canceled: false, browser: null, profileUuid: task.payload.profileUuid };
   running.set(task.id, handle);
@@ -208,8 +241,9 @@ async function runTask(task) {
     for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
       try {
         let worker = leaveFacebookComment;
-        if (task.payload.type === 'hide') worker = hideForeignComments;
+        if (task.payload.type === 'hide' || task.payload.type === 'hidebg') worker = hideForeignComments;
         else if (task.payload.type === 'pages') worker = collectPages;
+        else if (task.payload.type === 'scout') worker = scoutWatchedPosts;
         const work = worker(task.payload, taskLog, handle);
         work.catch(() => {}); // проглотить, если таймаут выиграл гонку
         // eslint-disable-next-line no-await-in-loop
@@ -274,8 +308,13 @@ async function runTask(task) {
     store.update(task.id, { logs: taskLog.getLines() });
     taskLog.close();
     if (!handle.canceled) recordDuration(task.id); // отменённые не портят среднее
+    // Фоновая авто-чистка — отметим результат в записи наблюдения (для UI-статуса).
+    if (task.payload.type === 'hidebg') {
+      try { require('./watchScheduler').onCleanFinished(task); } catch { /* ignore */ }
+    }
     running.delete(task.id);
     active--;
+    if (isBg) activeBg -= 1;
     runningProfiles.delete(task.payload.profileUuid);
     drain();
   }
@@ -309,6 +348,7 @@ function cancel(id) {
 function stats() {
   return {
     active,
+    activeBg,
     queued: pending.length,
     maxConcurrent: config.maxConcurrent,
     runningProfiles: runningProfiles.size,

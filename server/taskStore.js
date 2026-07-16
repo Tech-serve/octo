@@ -158,6 +158,150 @@ function referencedUploadFiles() {
   return set;
 }
 
+// НАБЛЮДЕНИЕ (авто-модерация): посты, которые чистим в фоне по мере появления
+// чужих комментов. Единица — как в удалялке: пост + страница-админ + профиль.
+// enabled — тумблер (снятие = стоп). Остальные поля — стейт детекта/чистки,
+// переживающий рестарт PM2. period_ms — базовая каденция скаута.
+db.exec(`
+  CREATE TABLE IF NOT EXISTS watch_posts (
+    id            TEXT PRIMARY KEY,
+    owner         TEXT NOT NULL DEFAULT 'local',
+    post_url      TEXT NOT NULL,
+    page_name     TEXT,
+    profile_uuid  TEXT NOT NULL,
+    enabled       INTEGER NOT NULL DEFAULT 1,
+    period_ms     INTEGER NOT NULL DEFAULT 1800000,
+    seen_marker   TEXT,
+    dirty         INTEGER NOT NULL DEFAULT 1,
+    last_check_at TEXT,
+    last_clean_at TEXT,
+    last_hidden   INTEGER DEFAULT 0,
+    last_error    TEXT,
+    created_at    TEXT NOT NULL,
+    updated_at    TEXT NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS idx_watch_enabled ON watch_posts(enabled);
+`);
+
+const watchInsertStmt = db.prepare(`
+  INSERT INTO watch_posts (id, owner, post_url, page_name, profile_uuid, enabled, period_ms,
+    seen_marker, dirty, last_check_at, last_clean_at, last_hidden, last_error, created_at, updated_at)
+  VALUES (?, ?, ?, ?, ?, 1, ?, NULL, 1, NULL, NULL, 0, NULL, ?, ?)
+`);
+const watchListAllStmt = db.prepare('SELECT * FROM watch_posts ORDER BY created_at DESC');
+const watchListByOwnerStmt = db.prepare('SELECT * FROM watch_posts WHERE owner = ? ORDER BY created_at DESC');
+const watchListEnabledStmt = db.prepare('SELECT * FROM watch_posts WHERE enabled = 1');
+const watchGetStmt = db.prepare('SELECT * FROM watch_posts WHERE id = ?');
+const watchByPostProfileStmt = db.prepare('SELECT * FROM watch_posts WHERE post_url = ? AND profile_uuid = ? LIMIT 1');
+const watchSetEnabledStmt = db.prepare('UPDATE watch_posts SET enabled = ?, updated_at = ? WHERE id = ?');
+const watchDeleteStmt = db.prepare('DELETE FROM watch_posts WHERE id = ?');
+const watchUpdateStateStmt = db.prepare(`
+  UPDATE watch_posts SET seen_marker = ?, dirty = ?, last_check_at = ?, last_clean_at = ?,
+    last_hidden = ?, last_error = ?, updated_at = ? WHERE id = ?
+`);
+
+function rowToWatch(r) {
+  if (!r) return null;
+  return {
+    id: r.id,
+    owner: r.owner || 'local',
+    postUrl: r.post_url,
+    pageName: r.page_name || '',
+    profileUuid: r.profile_uuid,
+    enabled: !!r.enabled,
+    periodMs: r.period_ms,
+    seenMarker: r.seen_marker || '',
+    dirty: !!r.dirty,
+    lastCheckAt: r.last_check_at || null,
+    lastCleanAt: r.last_clean_at || null,
+    lastHidden: r.last_hidden || 0,
+    lastError: r.last_error || null,
+    createdAt: r.created_at,
+    updatedAt: r.updated_at,
+  };
+}
+
+function addWatch({
+  owner, postUrl, pageName, profileUuid, periodMs,
+}) {
+  const id = crypto.randomUUID();
+  const now = new Date().toISOString();
+  watchInsertStmt.run(id, owner || 'local', postUrl, pageName || '', profileUuid,
+    periodMs || 1800000, now, now);
+  return rowToWatch(watchGetStmt.get(id));
+}
+function listWatch(owner) {
+  const rows = owner ? watchListByOwnerStmt.all(owner) : watchListAllStmt.all();
+  return rows.map(rowToWatch);
+}
+function listEnabledWatch() {
+  return watchListEnabledStmt.all().map(rowToWatch);
+}
+function getWatch(id) { return rowToWatch(watchGetStmt.get(id)); }
+function findWatchByPostProfile(postUrl, profileUuid) {
+  return rowToWatch(watchByPostProfileStmt.get(postUrl, profileUuid));
+}
+function setWatchEnabled(id, enabled) {
+  watchSetEnabledStmt.run(enabled ? 1 : 0, new Date().toISOString(), id);
+  return getWatch(id);
+}
+function deleteWatch(id) { watchDeleteStmt.run(id); }
+
+// Частичное обновление стейта наблюдения (детект/чистка).
+function updateWatchState(id, patch) {
+  const cur = watchGetStmt.get(id);
+  if (!cur) return null;
+  watchUpdateStateStmt.run(
+    patch.seenMarker !== undefined ? patch.seenMarker : cur.seen_marker,
+    patch.dirty !== undefined ? (patch.dirty ? 1 : 0) : cur.dirty,
+    patch.lastCheckAt !== undefined ? patch.lastCheckAt : cur.last_check_at,
+    patch.lastCleanAt !== undefined ? patch.lastCleanAt : cur.last_clean_at,
+    patch.lastHidden !== undefined ? patch.lastHidden : cur.last_hidden,
+    patch.lastError !== undefined ? patch.lastError : cur.last_error,
+    new Date().toISOString(),
+    id,
+  );
+  return getWatch(id);
+}
+
+// Есть ли активная (в очереди/бежит) задача-чистка ЭТОГО поста — для коалесинга,
+// чтобы не плодить дубли чистки одного поста.
+const activeHideStmt = db.prepare(
+  "SELECT COUNT(*) AS n FROM tasks WHERE kind IN ('hide','hidebg') AND post_url = ? AND profile_uuid = ? AND status IN ('queued','running')",
+);
+function activeHideExists(postUrl, profileUuid) {
+  return activeHideStmt.get(postUrl, profileUuid).n > 0;
+}
+
+// Есть ли сейчас активная (в очереди/бежит) задача-скаут — держим одного зараз.
+const activeScoutStmt = db.prepare(
+  "SELECT COUNT(*) AS n FROM tasks WHERE kind = 'scout' AND status IN ('queued','running')",
+);
+function activeScoutExists() {
+  return activeScoutStmt.get().n > 0;
+}
+
+// Профили, у которых есть задача в очереди/в работе (заняты — скаутом не берём).
+const activeProfilesStmt = db.prepare(
+  "SELECT DISTINCT profile_uuid FROM tasks WHERE status IN ('queued','running')",
+);
+function activeProfileUuids() {
+  return new Set(activeProfilesStmt.all().map((r) => r.profile_uuid));
+}
+
+// Когда каждый профиль в последний раз запускался (MAX started_at, мс). Для выбора
+// «наименее-недавно-использованного» скаута.
+const lastUsedStmt = db.prepare(
+  'SELECT profile_uuid, MAX(started_at) AS t FROM tasks WHERE started_at IS NOT NULL GROUP BY profile_uuid',
+);
+function lastUsedByProfile() {
+  const out = {};
+  for (const r of lastUsedStmt.all()) {
+    out[r.profile_uuid] = r.t ? new Date(r.t).getTime() : 0;
+  }
+  return out;
+}
+
 // Строку БД -> объект задачи привычной формы (с payload).
 function rowToTask(r) {
   if (!r) return null;
@@ -381,4 +525,7 @@ module.exports = {
   listByDialog, deleteTask,
   getDrafts, putDraft, deleteDraft, referencedUploadFiles,
   savePages, getPages,
+  addWatch, listWatch, listEnabledWatch, getWatch, findWatchByPostProfile,
+  setWatchEnabled, deleteWatch, updateWatchState, activeHideExists,
+  activeScoutExists, activeProfileUuids, lastUsedByProfile,
 };

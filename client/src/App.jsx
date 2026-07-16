@@ -344,6 +344,10 @@ function Operation({
   const [pageName, setPageName] = useState(saved.pageName || '')
   const [collectingPages, setCollectingPages] = useState(false)
   const [collectSeconds, setCollectSeconds] = useState(0)
+  // Режим 4: наблюдение (авто-чистка) — список отслеживаемых постов + здоровье скаута.
+  const [watchItems, setWatchItems] = useState([])
+  const [watchScout, setWatchScout] = useState(null)
+  const [watchBusy, setWatchBusy] = useState(false)
   const collectTimerRef = useRef(null)
   const pollRef = useRef(null)
   const latestData = useRef(null)
@@ -618,6 +622,45 @@ function Operation({
       setSubmitting(false)
     }
   }
+
+  // Режим 4: наблюдение — загрузка списка/статуса, добавление, тумблер, удаление.
+  const loadWatch = async () => {
+    try {
+      const { data } = await axios.get(`${API_BASE}/api/watch`)
+      setWatchItems(data.items || [])
+      setWatchScout(data.scout || null)
+    } catch { /* пропустим */ }
+  }
+  const addWatch = async () => {
+    setError('')
+    const url = post4.trim()
+    if (!profileUuid) { setError('Выберите профиль-админ (тег Hide)'); return }
+    if (!url) { setError('Введите ссылку на пост'); return }
+    setWatchBusy(true)
+    try {
+      await axios.post(`${API_BASE}/api/watch`, { profileUuid, postUrl: url, pageName })
+      await loadWatch()
+    } catch (e) {
+      setError(`Ошибка: ${e.response?.data?.error || e.message}`)
+    } finally {
+      setWatchBusy(false)
+    }
+  }
+  const toggleWatch = async (id, enabled) => {
+    try { await axios.post(`${API_BASE}/api/watch/${id}/toggle`, { enabled }); await loadWatch() } catch { /* пропустим */ }
+  }
+  const removeWatch = async (id) => {
+    try { await axios.delete(`${API_BASE}/api/watch/${id}`); await loadWatch() } catch { /* пропустим */ }
+  }
+
+  useEffect(() => {
+    if (mode !== 4) return undefined
+    // Первый забор — отложенно (не синхронно в теле эффекта, чтобы не было
+    // каскадного setState), дальше опрос статуса раз в 15с.
+    const t = setTimeout(loadWatch, 0)
+    const id = setInterval(loadWatch, 15000)
+    return () => { clearTimeout(t); clearInterval(id) }
+  }, [mode])
 
   const startTask = async () => {
     if (mode === 4) { await startMode4(); return }
@@ -1129,6 +1172,45 @@ function Operation({
           Скрывает ЧУЖИЕ комментарии на посте от имени выбранного админа. Комментарии
           наших фейков (по вайт-листу) не трогает. Пауза 1–2 сек между скрытиями.
         </p>
+        <button
+          type="button"
+          className="tm-btn tm-btn-outline"
+          onClick={addWatch}
+          disabled={watchBusy || !profileUuid}
+          title="Добавить пост в наблюдение: бот сам будет находить и скрывать новые чужие комментарии"
+        >
+          {watchBusy ? 'Добавляю…' : '➕ В наблюдение (авто-чистка)'}
+        </button>
+
+        {watchItems.length > 0 && (
+          <div className="tm-card" style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+              <strong style={{ fontSize: '13px' }}>Наблюдение · авто-чистка</strong>
+              <span className="tm-muted" style={{ fontSize: '11px' }}>
+                Скаут: {watchScout ? (watchScout.available ? 'ок' : 'нет свободного профиля') : '—'}
+              </span>
+            </div>
+            {watchItems.map((w) => (
+              <div key={w.id} style={{ display: 'flex', flexDirection: 'column', gap: '2px', borderTop: '1px solid var(--border)', paddingTop: '6px' }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', gap: '8px', alignItems: 'center' }}>
+                  <a className="tm-link" href={w.postUrl} target="_blank" rel="noreferrer" style={{ fontSize: '12px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{w.postUrl}</a>
+                  <div style={{ display: 'flex', gap: '6px', flex: '0 0 auto' }}>
+                    <button type="button" className="tm-btn tm-btn-outline" style={{ fontSize: '11px', padding: '2px 8px' }} onClick={() => toggleWatch(w.id, !w.enabled)}>
+                      {w.enabled ? '⏸ Выкл' : '▶ Вкл'}
+                    </button>
+                    <button type="button" className="tm-btn tm-btn-outline" style={{ fontSize: '11px', padding: '2px 8px' }} onClick={() => removeWatch(w.id)} title="Убрать из наблюдения">✕</button>
+                  </div>
+                </div>
+                <span className="tm-muted" style={{ fontSize: '11px' }}>
+                  Страница: {w.pageName || '—'} · {w.enabled ? 'вкл' : 'выкл'}
+                  {w.lastCheckAt ? ` · проверен ${new Date(w.lastCheckAt).toLocaleTimeString()}` : ' · ещё не проверялся'}
+                  {w.lastCleanAt ? ` · чистка ${new Date(w.lastCleanAt).toLocaleTimeString()} (скрыто ${w.lastHidden})` : ''}
+                </span>
+                {w.lastError && <span className="tm-danger-text" style={{ fontSize: '11px' }}>{w.lastError}</span>}
+              </div>
+            ))}
+          </div>
+        )}
       </>
       )}
 

@@ -573,6 +573,48 @@ app.post('/api/hide', ownerMiddleware, (req, res) => {
   });
 });
 
+// ── НАБЛЮДЕНИЕ (авто-модерация): фоновая чистка постов из списка ──
+// Единица наблюдения = как в удалялке: пост + страница-админ + профиль. Заводим
+// руками; снятие — тумблером. Планировщик (watchScheduler) ставит фоновую чистку
+// по каденции; приоритет/потолок держит очередь.
+app.get('/api/watch', ownerMiddleware, (req, res) => {
+  const owner = config.authEnabled ? req.owner : null;
+  let scout = null;
+  try { scout = require('./watchScheduler').getHealth(); } catch { /* ignore */ }
+  res.json({ items: store.listWatch(owner), scout });
+});
+
+app.post('/api/watch', ownerMiddleware, (req, res) => {
+  const profileUuid = req.body && req.body.profileUuid;
+  const postUrl = req.body && (req.body.postUrl || '').trim();
+  if (!profileUuid) return res.status(400).json({ error: 'Выберите профиль-админ' });
+  if (!postUrl) return res.status(400).json({ error: 'Введите ссылку на пост' });
+  const pageName = req.body && (req.body.pageName || '').trim();
+  const owner = config.authEnabled ? req.owner : 'local';
+  const periodMin = Number(req.body && req.body.periodMinutes);
+  const periodMs = Number.isFinite(periodMin) && periodMin >= 1 ? Math.round(periodMin * 60000) : undefined;
+  const item = store.addWatch({
+    owner, postUrl, pageName, profileUuid, periodMs,
+  });
+  res.status(201).json({ item });
+});
+
+app.post('/api/watch/:id/toggle', ownerMiddleware, (req, res) => {
+  const cur = store.getWatch(req.params.id);
+  if (!cur) return res.status(404).json({ error: 'Наблюдение не найдено' });
+  if (config.authEnabled && cur.owner !== req.owner) return res.status(404).json({ error: 'Наблюдение не найдено' });
+  const enabled = !!(req.body && req.body.enabled);
+  res.json({ item: store.setWatchEnabled(req.params.id, enabled) });
+});
+
+app.delete('/api/watch/:id', ownerMiddleware, (req, res) => {
+  const cur = store.getWatch(req.params.id);
+  if (!cur) return res.status(404).json({ error: 'Наблюдение не найдено' });
+  if (config.authEnabled && cur.owner !== req.owner) return res.status(404).json({ error: 'Наблюдение не найдено' });
+  store.deleteWatch(req.params.id);
+  res.json({ ok: true });
+});
+
 // Статус конкретной задачи (для поллинга с фронта). Только своя задача.
 app.get('/api/tasks/:id', ownerMiddleware, (req, res) => {
   const task = store.get(req.params.id);
@@ -682,5 +724,9 @@ app.listen(config.port, () => {
     if (pending.length) logger.info(`Восстановлено задач из БД: ${pending.length}`, 'boot');
   } catch (e) {
     logger.error(`Не удалось восстановить задачи из БД: ${e.message}`, 'boot');
+  }
+  // Планировщик наблюдения (фоновая авто-чистка постов из списка).
+  try { require('./watchScheduler').start(); } catch (e) {
+    logger.error(`Не удалось запустить планировщик наблюдения: ${e.message}`, 'boot');
   }
 });

@@ -1011,11 +1011,14 @@ async function leaveFacebookComment(payload, log, handle = {}) {
     } catch (e) {
       log.warn(`[FB Bot] Не удалось прочитать FB-идентичность: ${e.message}`);
     }
+    // Пиггибэк-детект: пост уже открыт — если он в наблюдении, дёшево глянем чужих
+    // и при наличии разбудим чистку. Обёрнуто — постинг не роняет.
+    await piggybackDetect(page, postUrl, log);
     return identity;
   } finally {
     // Останавливаем только если МЫ его открыли (connection есть). Если старт
     // упал с «already started» — в профиле работает человек, не трогаем.
-    if (connection && profileUuid) await disconnectOcto(profileUuid, log);
+    if (connection && profileUuid) await disconnectOcto(profileUuid, log, connection.browser);
     // Картинку НЕ удаляем — она нужна для истории/просмотра (раздаётся статикой).
   }
 }
@@ -1415,7 +1418,162 @@ async function hideForeignComments(payload, log, handle = {}) {
       hidden, deleted, skippedOurs, failed,
     };
   } finally {
-    if (connection && profileUuid) await disconnectOcto(profileUuid, log);
+    if (connection && profileUuid) await disconnectOcto(profileUuid, log, connection.browser);
+  }
+}
+
+// Read-only: сколько ЧУЖИХ (не из вайт-листа), видимых и ещё НЕ скрытых комментов
+// сейчас в DOM. Скаут этим только детектит «есть ли работа», НЕ трогает комменты.
+async function countForeignVisible(page, ourIds, ourNames) {
+  return page.evaluate(({
+    ids, names, cwords, hiddenMarks,
+  }) => {
+    const clean = (s) => (s || '').toLowerCase().replace(/\s+/g, ' ').trim();
+    const root = (() => {
+      for (const d of document.querySelectorAll('div[role="dialog"]')) {
+        const r = d.getBoundingClientRect();
+        if (r.width > 300 && r.height > 300) return d;
+      }
+      return document;
+    })();
+    const skip = (t) => !t || t.length < 2 || t.length > 60
+      || t.includes('индикатор') || t.includes('status') || t.includes('онлайн')
+      || t.includes('online') || /^\d+$/.test(t);
+    let n = 0;
+    for (const a of root.querySelectorAll('div[role="article"]')) {
+      const al = clean(a.getAttribute('aria-label'));
+      if (!al || !cwords.some((w) => al.includes(w))) continue;
+      const r = a.getBoundingClientRect();
+      if (r.width <= 0 || r.height <= 0) continue;
+      const txt = clean(a.innerText || a.textContent);
+      if (txt && hiddenMarks.some((w) => txt.includes(w))) continue; // уже скрыт
+      let name = ''; let fid = '';
+      for (const l of a.querySelectorAll('a[role="link"][href], a[href]')) {
+        const t = clean(l.innerText || l.textContent);
+        if (!skip(t)) { name = t; break; }
+      }
+      const idLink = a.querySelector('a[href*="/profile.php?id="]');
+      if (idLink) { const m = (idLink.getAttribute('href') || '').match(/[?&]id=(\d+)/); if (m) fid = m[1]; }
+      const ours = (fid && ids.includes(fid)) || (name && names.includes(name));
+      if (!ours) n += 1;
+    }
+    return n;
+  }, {
+    ids: ourIds, names: ourNames, cwords: COMMENT_ITEM_ARIA, hiddenMarks: HIDDEN_MARKERS,
+  }).catch(() => 0);
+}
+
+// СКАУТ: один дешёвый профиль-читатель обходит посты из наблюдения, только ЧИТАЕТ
+// (не скрывает), и если видит чужие комменты — будит чистку под нужной страницей.
+// Профиль-скаут — боевой фейк (может читать); скрывает потом админ через очередь.
+async function scoutWatchedPosts(payload, log, handle = {}) {
+  const { profileUuid } = payload;
+  const posts = payload.posts || [];
+  const ensureLive = () => { if (handle.canceled) throw new Error('Операция отменена пользователем'); };
+  // eslint-disable-next-line global-require
+  const queue = require('./queue');
+
+  const wl = store.listWhitelist();
+  const ourIds = []; const ourNames = [];
+  for (const k of Object.keys(wl)) {
+    if (wl[k].fbId) ourIds.push(String(wl[k].fbId));
+    if (wl[k].fbName) ourNames.push(String(wl[k].fbName).toLowerCase().replace(/\s+/g, ' ').trim());
+  }
+  log.info(`[Скаут] Обхожу постов: ${posts.length}. Свой вайт-лист: id=${ourIds.length}, имён=${ourNames.length}.`);
+
+  let connection;
+  let firstPost = true;
+  try {
+    connection = await connectToOcto(profileUuid, log, { forceRestart: false });
+    handle.browser = connection.browser;
+    const { page } = connection;
+    page.__persona = createPersona(profileUuid);
+
+    for (const post of posts) {
+      ensureLive();
+      try {
+        // eslint-disable-next-line no-await-in-loop
+        await page.goto(post.postUrl, { waitUntil: 'domcontentloaded', timeout: config.navTimeout });
+        // eslint-disable-next-line no-await-in-loop
+        await silenceVideos(page, log);
+        // eslint-disable-next-line no-await-in-loop
+        await idleMouse(page);
+        // eslint-disable-next-line no-await-in-loop
+        await sleep(rand(1500, 3000)); // короткое «чтение» поста
+
+        // Проверяем здоровье САМОГО скаута только на первом посту: если он словил
+        // чекпоинт/бан — бросаем с accountStatus, очередь пометит профиль и мы
+        // возьмём другого скаута в следующий раз.
+        if (firstPost) {
+          firstPost = false;
+          // eslint-disable-next-line no-await-in-loop
+          const block = await detectBlock(page);
+          if (block) { const e = new Error(`Скаут недоступен: ${block}`); e.accountStatus = 'checkpoint'; throw e; }
+        }
+
+        // eslint-disable-next-line no-await-in-loop
+        const dialog = await getDialog(page);
+        if (dialog) {
+          // eslint-disable-next-line no-await-in-loop
+          const db = await dialog.boundingBox().catch(() => null);
+          if (db) {
+            // eslint-disable-next-line no-await-in-loop
+            await moveMouse(page, db.x + db.width * rand(0.4, 0.6), db.y + db.height * rand(0.4, 0.6));
+          }
+        }
+        // eslint-disable-next-line no-await-in-loop
+        await switchToAllComments(page, log);
+
+        // Детект «есть ли чужие»: считаем на первом экране и паре подгрузок; как
+        // только увидели хоть одного чужого — стоп (дешевле, чем полный обход).
+        let foreign = 0;
+        for (let s = 0; s < 3 && foreign === 0; s += 1) {
+          // eslint-disable-next-line no-await-in-loop
+          foreign = await countForeignVisible(page, ourIds, ourNames);
+          if (foreign === 0 && s < 2) {
+            // eslint-disable-next-line no-await-in-loop
+            await scrollComments(page);
+            // eslint-disable-next-line no-await-in-loop
+            await sleep(rand(900, 1500));
+          }
+        }
+        log.info(`[Скаут] Пост ${post.postUrl.slice(0, 55)}: чужих видно ${foreign}.`);
+
+        try {
+          store.updateWatchState(post.id, {
+            lastCheckAt: new Date().toISOString(),
+            dirty: foreign > 0,
+            lastError: null,
+          });
+        } catch { /* ignore */ }
+
+        // Есть чужие → будим чистку под АДМИН-профилем поста (коалесинг: не дублируем).
+        if (foreign > 0 && !store.activeHideExists(post.postUrl, post.adminProfileUuid)) {
+          const now = Date.now();
+          const task = store.createTask(
+            {
+              profileUuid: post.adminProfileUuid,
+              postUrl: post.postUrl,
+              commentText: post.pageName ? `Наблюдение · чистка от «${post.pageName}»` : 'Наблюдение · чистка',
+              pageName: post.pageName,
+              type: 'hidebg',
+            },
+            { scheduledAt: queue.earliestSlot(post.adminProfileUuid, now, now), owner: post.owner },
+          );
+          queue.enqueue(task);
+          log.info(`[Скаут] Есть чужие → поставил чистку под «${post.pageName || '—'}».`);
+        }
+      } catch (e) {
+        if (e.accountStatus) throw e; // здоровье скаута — наверх (пометит профиль)
+        log.warn(`[Скаут] Пост пропущен (${post.postUrl.slice(0, 45)}): ${e.message}`);
+        try { store.updateWatchState(post.id, { lastCheckAt: new Date().toISOString(), lastError: e.message }); } catch { /* ignore */ }
+      }
+      // eslint-disable-next-line no-await-in-loop
+      await sleep(rand(1500, 3500)); // человеческая пауза между постами
+    }
+    return { scout: true, checked: posts.length };
+  } finally {
+    if (connection && profileUuid) await disconnectOcto(profileUuid, log, connection.browser);
   }
 }
 
@@ -1564,8 +1722,68 @@ async function collectPages(payload, log, handle = {}) {
     log.info(`[Страницы] Сохранено страниц: ${pages.length} — ${JSON.stringify(pages.map((p) => p.name))}`);
     return { pages: pages.length };
   } finally {
-    if (connection && profileUuid) await disconnectOcto(profileUuid, log);
+    if (connection && profileUuid) await disconnectOcto(profileUuid, log, connection.browser);
   }
 }
 
-module.exports = { leaveFacebookComment, hideForeignComments, collectPages };
+// Стабильный «ключ» поста из FB-URL (story_fbid/fbid + id + путь), чтобы
+// сматчить пост постинга с записью наблюдения даже при разных трекинг-параметрах.
+function postKey(url) {
+  try {
+    const u = new URL(url);
+    const q = u.searchParams;
+    const fbid = q.get('story_fbid') || q.get('fbid') || '';
+    const id = q.get('id') || '';
+    let pathId = '';
+    const m = u.pathname.match(/\/(?:posts|permalink|photos|videos)\/([\w.]+)/);
+    if (m) pathId = m[1];
+    const key = [fbid, id, pathId].filter(Boolean).join('|');
+    return key || `${u.hostname}${u.pathname}`;
+  } catch { return url; }
+}
+
+// ПИГГИБЭК: вызывается ПОСЛЕ успешного постинга, пока профиль-фейк и так открыт на
+// посте. Если пост в списке наблюдения — по-дешёвке (read-only, без переключения
+// сортировки) считаем чужих и, если есть, будим чистку под АДМИН-профилем поста.
+// Полностью обёрнуто: любой сбой здесь НЕ роняет и не тормозит постинг.
+async function piggybackDetect(page, postUrl, log) {
+  try {
+    // eslint-disable-next-line global-require
+    const queue = require('./queue');
+    const key = postKey(postUrl);
+    const watched = store.listEnabledWatch().find((w) => postKey(w.postUrl) === key);
+    if (!watched) return;
+
+    const wl = store.listWhitelist();
+    const ourIds = []; const ourNames = [];
+    for (const k of Object.keys(wl)) {
+      if (wl[k].fbId) ourIds.push(String(wl[k].fbId));
+      if (wl[k].fbName) ourNames.push(String(wl[k].fbName).toLowerCase().replace(/\s+/g, ' ').trim());
+    }
+    const foreign = await countForeignVisible(page, ourIds, ourNames);
+    try { store.updateWatchState(watched.id, { lastCheckAt: new Date().toISOString(), dirty: foreign > 0 }); } catch { /* ignore */ }
+    log.info(`[Пиггибэк] Пост в наблюдении: чужих видно ${foreign}.`);
+
+    if (foreign > 0 && !store.activeHideExists(watched.postUrl, watched.profileUuid)) {
+      const now = Date.now();
+      const task = store.createTask(
+        {
+          profileUuid: watched.profileUuid,
+          postUrl: watched.postUrl,
+          commentText: watched.pageName ? `Наблюдение · чистка от «${watched.pageName}»` : 'Наблюдение · чистка',
+          pageName: watched.pageName,
+          type: 'hidebg',
+        },
+        { scheduledAt: queue.earliestSlot(watched.profileUuid, now, now), owner: watched.owner },
+      );
+      queue.enqueue(task);
+      log.info(`[Пиггибэк] Есть чужие → поставил чистку под «${watched.pageName || '—'}».`);
+    }
+  } catch (e) {
+    try { log.warn(`[Пиггибэк] Пропущен (не критично): ${e.message}`); } catch { /* ignore */ }
+  }
+}
+
+module.exports = {
+  leaveFacebookComment, hideForeignComments, collectPages, scoutWatchedPosts,
+};
