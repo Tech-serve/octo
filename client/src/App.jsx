@@ -1204,6 +1204,7 @@ function Operation({
                 <span className="tm-muted" style={{ fontSize: '11px' }}>
                   Страница: {w.pageName || '—'} · {w.enabled ? 'вкл' : 'выкл'}
                   {w.lastCheckAt ? ` · проверен ${new Date(w.lastCheckAt).toLocaleTimeString()}` : ' · ещё не проверялся'}
+                  {w.enabled && w.lastCheckAt && w.periodMs ? ` · след. ~${new Date(new Date(w.lastCheckAt).getTime() + w.periodMs).toLocaleTimeString()}` : ''}
                   {w.lastCleanAt ? ` · чистка ${new Date(w.lastCleanAt).toLocaleTimeString()} (скрыто ${w.lastHidden})` : ''}
                 </span>
                 {w.lastError && <span className="tm-danger-text" style={{ fontSize: '11px' }}>{w.lastError}</span>}
